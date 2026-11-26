@@ -133,7 +133,9 @@ void motorsInit() {
   ledcAttach(BODY_IN1, MOTOR_PWM_HZ, MOTOR_PWM_BITS);
   ledcAttach(BODY_IN2, MOTOR_PWM_HZ, MOTOR_PWM_BITS);
 }
+bool motorsOn = true;                          // serial "motors=off" to test audio without motor noise
 void drive(int in1, int in2, int speed) {      // speed -255..255, 0 = coast
+  if (!motorsOn) speed = 0;
   if (speed >= 0) { ledcWrite(in1, speed); ledcWrite(in2, 0); }
   else            { ledcWrite(in1, 0);     ledcWrite(in2, -speed); }
 }
@@ -688,13 +690,30 @@ void serialCommands() {
     wifiPass = comma < 0 ? "" : line.substring(comma + 1);
     saveSettings();
     Serial.println("Wi-Fi saved. Type restart to apply.");
+  } else if (line == "motors=off" || line == "motors=on") {
+    motorsOn = line.endsWith("on");
+    drive(MOUTH_IN1, MOUTH_IN2, 0); drive(BODY_IN1, BODY_IN2, 0);
+    Serial.printf("Motors %s (until restart)\n", motorsOn ? "ON" : "OFF");
+  } else if (line == "tone") {
+    // 2 s of 440 Hz then 2 s of a slow sweep, through the same path as Billy's voice
+    Serial.println("Playing test tone...");
+    static int16_t blk[480];
+    float ph = 0;
+    for (int n = 0; n < API_OUT_RATE * 4; n += 480) {
+      for (int i = 0; i < 480; i++) {
+        float f = (n + i) < API_OUT_RATE * 2 ? 440.0f : 200.0f + 1800.0f * (n + i - API_OUT_RATE * 2) / (API_OUT_RATE * 2);
+        ph += 2 * PI * f / API_OUT_RATE; if (ph > 2 * PI) ph -= 2 * PI;
+        blk[i] = (int16_t)(8000 * sinf(ph));
+      }
+      xStreamBufferSend(playBuf, blk, sizeof(blk), portMAX_DELAY);
+    }
   } else if (line == "wake=reset") {
     prefs.begin("billy", false); prefs.remove("srbad"); prefs.end();
     Serial.println("Wake phrase re-enabled. Type restart to apply.");
   } else if (line == "restart") {
     ESP.restart();
   } else if (line.length()) {
-    Serial.println("Commands: key=..., wifi=SSID,password, wake=reset, restart");
+    Serial.println("Commands: key=..., wifi=SSID,password, motors=off|on, tone, wake=reset, restart");
   }
 }
 

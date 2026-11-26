@@ -54,6 +54,11 @@ volatile uint32_t audioGaps = 0;        // playback ran dry mid-reply (diagnosti
 volatile uint32_t stChunks = 0, stBytes = 0, stBadChunks = 0, stOddChunks = 0;
 volatile uint32_t stLateWrites = 0, stMaxWriteGapMs = 0, stMinBufMs = 99999;
 uint8_t oddByte = 0; bool haveOddByte = false;
+// Diagnostic capture of the last reply: what Gemini sent (24 kHz) and what we
+// sent to the speaker (16 kHz). Download at http://<fish-ip>/  (in.wav / out.wav)
+const size_t CAP_IN_MAX = API_OUT_RATE * 20, CAP_OUT_MAX = I2S_RATE * 20;   // 20 s each
+int16_t *capIn = nullptr, *capOut = nullptr;
+volatile size_t capInLen = 0, capOutLen = 0;
 volatile bool wakeHeard = false;        // set by the recognizer callback
 bool sessionReady = false;
 bool turnDone = false;
@@ -295,6 +300,11 @@ void audioTask(void *) {
     }
     memmove(xin, xin + 480, HIST * sizeof(float));
     int outN = got ? 320 : 0;
+    if (got && capOut) {
+      size_t n = min((size_t)320, CAP_OUT_MAX - capOutLen);
+      for (size_t i = 0; i < n; i++) capOut[capOutLen + i] = out[i * 2];
+      capOutLen += n;
+    }
 
     static uint32_t lastWrite = 0;
     uint32_t tw = millis();
@@ -557,8 +567,14 @@ void onWsMessage(char *msg, size_t len) {
       } else if (olen) {
         micMuted = true;                                // Billy is about to talk
         lastBillyAudio = millis();
+        if (replyComplete) { capInLen = 0; capOutLen = 0; }   // first audio of a new reply
         replyComplete = false;
         stChunks++; stBytes += olen;
+        if (capIn) {
+          size_t n = min((size_t)(olen / 2), CAP_IN_MAX - capInLen);
+          memcpy(capIn + capInLen, d, n * 2);           // note: d still at chunk start here
+          capInLen += n;
+        }
         uint8_t *bytes = (uint8_t *)d;
         if (haveOddByte) {                              // finish a sample split across chunks
           uint8_t pair[2] = {oddByte, bytes[0]};
@@ -750,6 +766,7 @@ void setup() {
     setLed(30, 0, 40); startPortal(); return;
   }
   Serial.println("Wi-Fi OK: " + WiFi.localIP().toString());
+  startStationWeb();
   checkForUpdate();                                    // reboots if a newer release was installed
 
   headOut(); delay(500); bodyRelax(); tailOut(); delay(250); bodyRelax();   // hello wiggle
@@ -802,9 +819,43 @@ void serialCommands() {
   }
 }
 
+// ---- tiny diagnostics web page on the home network
+void sendWav(const int16_t *data, size_t samples, uint32_t rate) {
+  uint8_t hdr[44];
+  uint32_t dataBytes = samples * 2, riff = 36 + dataBytes, byteRate = rate * 2;
+  memcpy(hdr, "RIFF", 4); memcpy(hdr + 4, &riff, 4); memcpy(hdr + 8, "WAVEfmt ", 8);
+  uint32_t fmtLen = 16; uint16_t pcm = 1, ch = 1, align = 2, bits = 16;
+  memcpy(hdr + 16, &fmtLen, 4); memcpy(hdr + 20, &pcm, 2); memcpy(hdr + 22, &ch, 2);
+  memcpy(hdr + 24, &rate, 4); memcpy(hdr + 28, &byteRate, 4); memcpy(hdr + 32, &align, 2);
+  memcpy(hdr + 34, &bits, 2); memcpy(hdr + 36, "data", 4); memcpy(hdr + 40, &dataBytes, 4);
+  web.setContentLength(44 + dataBytes);
+  web.send(200, "audio/wav", "");
+  WiFiClient c = web.client();
+  c.write(hdr, 44);
+  const uint8_t *p = (const uint8_t *)data;
+  for (size_t off = 0; off < dataBytes; off += 4096) c.write(p + off, min((size_t)4096, (size_t)(dataBytes - off)));
+}
+
+void startStationWeb() {
+  capIn = (int16_t *)ps_malloc(CAP_IN_MAX * 2);
+  capOut = (int16_t *)ps_malloc(CAP_OUT_MAX * 2);
+  web.on("/", HTTP_GET, [] {
+    web.send(200, "text/html",
+      "<html><body style='font-family:sans-serif'><h2>SassyBass last reply</h2>"
+      "<p>From Gemini (24 kHz):<br><audio controls src='/in.wav'></audio> <a href='/in.wav'>download</a></p>"
+      "<p>Sent to speaker (16 kHz):<br><audio controls src='/out.wav'></audio> <a href='/out.wav'>download</a></p>"
+      "</body></html>");
+  });
+  web.on("/in.wav", HTTP_GET, [] { sendWav(capIn, capInLen, API_OUT_RATE); });
+  web.on("/out.wav", HTTP_GET, [] { sendWav(capOut, capOutLen, I2S_RATE); });
+  web.begin();
+  Serial.println("[web] last-reply audio at http://" + WiFi.localIP().toString() + "/");
+}
+
 void loop() {
   serialCommands();
   if (portalMode) { portalLoop(); return; }
+  web.handleClient();
 
   uint32_t now = millis();
 

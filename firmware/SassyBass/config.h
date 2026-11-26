@@ -26,7 +26,7 @@
 // Voice: listen to them in AI Studio (Stream / Live page).
 // A few to try:  Algenib (gravelly), Charon (informative), Puck (upbeat),
 //                Fenrir (excitable), Orus (firm), Kore (firm), Zephyr (bright), Aoede (breezy)
-#define GEMINI_VOICE   "Algenib"
+#define GEMINI_VOICE   "Puck"
 
 // Personality AND accent live in the same instructions text.
 #define BILLY_PERSONA \

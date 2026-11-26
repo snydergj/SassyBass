@@ -1,0 +1,107 @@
+# Builds the SassyBass firmware in the cloud.
+#  - Every push to main that touches firmware/: compile check only.
+#  - Pushing a tag like v1.0.0: compile, then publish the binaries to docs/
+#    (GitHub Pages). The web installer and every fish's auto-update pick it up.
+#
+# Release:  git tag v1.0.1 && git push origin v1.0.1
+#   (or on github.com: Releases > Draft a new release > new tag v1.0.1 > Publish)
+
+name: Build firmware
+
+on:
+  push:
+    branches: [main]
+    paths: ["firmware/**", ".github/workflows/build.yml"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ESP32_CORE: "3.3.13"
+  FQBN: "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=esp_sr_16,PSRAM=opi,CDCOnBoot=cdc"
+  SKETCH: firmware/SassyBass
+  PAGES_URL: https://snydergj.github.io/SassyBass
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version from tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+            echo "PUBLISH=true" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=dev" >> "$GITHUB_ENV"
+            echo "PUBLISH=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Stamp firmware version
+        run: printf '#pragma once\n#define FW_VERSION "%s"\n' "$VERSION" > "$SKETCH/fw_version.h"
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Cache Arduino cores
+        uses: actions/cache@v4
+        with:
+          path: ~/.arduino15
+          key: arduino15-esp32-${{ env.ESP32_CORE }}
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install "esp32:esp32@$ESP32_CORE"
+
+      - name: Compile
+        run: |
+          set -o pipefail
+          arduino-cli compile --fqbn "$FQBN" --build-path build "$SKETCH" 2>&1 | tee compile.log
+
+      - name: Report compile errors
+        if: failure()
+        run: |
+          grep -E "error:|Error|undefined reference" compile.log | head -40 | while IFS= read -r l; do
+            echo "::error::${l//$'\n'/ }"
+          done
+
+      - name: Collect binaries
+        run: |
+          mkdir -p out
+          cp build/SassyBass.ino.bin build/SassyBass.ino.bootloader.bin build/SassyBass.ino.partitions.bin build/boot_app0.bin out/
+          cp build/srmodels.bin out/
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SassyBass-${{ env.VERSION }}
+          path: out/
+
+      - name: Publish to GitHub Pages folder
+        if: env.PUBLISH == 'true'
+        run: |
+          git checkout -- "$SKETCH/fw_version.h"
+          git fetch origin main
+          git checkout -B main origin/main
+          rm -f docs/firmware/*.bin
+          cp out/*.bin docs/firmware/
+          cat > docs/version.json <<EOF
+          { "version": "$VERSION", "bin": "$PAGES_URL/firmware/SassyBass.ino.bin" }
+          EOF
+          python3 - <<'PY'
+          import json, os
+          p = "docs/manifest.json"
+          m = json.load(open(p))
+          m["version"] = os.environ["VERSION"]
+          json.dump(m, open(p, "w"), indent=2)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/
+          git commit -m "Publish firmware v$VERSION"
+          git push origin main

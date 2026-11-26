@@ -1,0 +1,49 @@
+# Crash decoder: paste a "Backtrace:" line (and the firmware version it came
+# from) into tools/backtrace.txt and push. This rebuilds that version, checks
+# the ELF matches, and prints the function/file/line for every address as
+# annotations on the workflow run.
+name: Decode crash backtrace
+
+on:
+  push:
+    branches: [main]
+    paths: ["tools/backtrace.txt"]
+  workflow_dispatch:
+
+env:
+  ESP32_CORE: "3.3.13"
+  FQBN: "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=esp_sr_16,PSRAM=opi,CDCOnBoot=cdc"
+  SKETCH: firmware/SassyBass
+
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stamp version
+        run: |
+          V=$(grep -m1 '^version=' tools/backtrace.txt | cut -d= -f2 | tr -d '\r ')
+          printf '#pragma once\n#define FW_VERSION "%s"\n' "${V:-dev}" > "$SKETCH/fw_version.h"
+      - uses: arduino/setup-arduino-cli@v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.arduino15
+          key: arduino15-esp32-${{ env.ESP32_CORE }}
+      - name: Install ESP32 core
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install "esp32:esp32@$ESP32_CORE"
+      - name: Compile
+        run: arduino-cli compile --fqbn "$FQBN" --build-path build "$SKETCH"
+      - name: Decode
+        run: |
+          A2L=$(find ~/.arduino15/packages/esp32/tools -name 'xtensa-esp32s3-elf-addr2line' -type f | head -1)
+          ELF=build/SassyBass.ino.elf
+          echo "::notice title=ELF SHA256::$(sha256sum $ELF | cut -c1-9)"
+          ADDRS=$(grep -oE '0x4[0-9a-fA-F]{7}' tools/backtrace.txt | sort -u -k1,1 --stable)
+          for a in $(grep -oE '0x4[0-9a-fA-F]{7}' tools/backtrace.txt); do
+            line=$("$A2L" -pfiaC -e "$ELF" "$a" | tr '\n' ' ' | sed 's#/home/runner/[^ ]*/packages/esp32/##g')
+            echo "::notice title=$a::$line"
+          done

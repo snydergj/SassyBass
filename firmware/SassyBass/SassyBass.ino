@@ -797,6 +797,25 @@ void serialCommands() {
     motorsOn = line.endsWith("on");
     drive(MOUTH_IN1, MOUTH_IN2, 0); drive(BODY_IN1, BODY_IN2, 0);
     Serial.printf("Motors %s (until restart)\n", motorsOn ? "ON" : "OFF");
+  } else if (line == "replay") {
+    // Play the last captured Gemini reply again through the speaker
+    if (!capIn || !capInLen) { Serial.println("Nothing captured yet."); return; }
+    Serial.printf("Replaying last reply (%u ms)...\n", (unsigned)(capInLen * 1000 / API_OUT_RATE));
+    size_t n = capInLen, sent = 0;
+    while (sent < n * 2) sent += xStreamBufferSend(playBuf, (uint8_t *)capIn + sent, n * 2 - sent, portMAX_DELAY);
+  } else if (line == "tone loud") {
+    // Like "tone" but near full scale, as loud as speech peaks
+    Serial.println("Playing LOUD test tone...");
+    static int16_t blk2[480];
+    float ph = 0;
+    for (int n = 0; n < API_OUT_RATE * 4; n += 480) {
+      for (int i = 0; i < 480; i++) {
+        float f = (n + i) < API_OUT_RATE * 2 ? 440.0f : 200.0f + 1800.0f * (n + i - API_OUT_RATE * 2) / (API_OUT_RATE * 2);
+        ph += 2 * PI * f / API_OUT_RATE; if (ph > 2 * PI) ph -= 2 * PI;
+        blk2[i] = (int16_t)(28000 * sinf(ph));
+      }
+      xStreamBufferSend(playBuf, blk2, sizeof(blk2), portMAX_DELAY);
+    }
   } else if (line == "tone") {
     // 2 s of 440 Hz then 2 s of a slow sweep, through the same path as Billy's voice
     Serial.println("Playing test tone...");
@@ -816,7 +835,7 @@ void serialCommands() {
   } else if (line == "restart") {
     ESP.restart();
   } else if (line.length()) {
-    Serial.println("Commands: key=..., wifi=SSID,password, motors=off|on, tone, wake=reset, restart");
+    Serial.println("Commands: key=..., wifi=SSID,password, motors=off|on, tone, tone loud, replay, wake=reset, restart");
   }
 }
 

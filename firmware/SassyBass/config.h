@@ -89,6 +89,7 @@
 #define MOUTH_THRESH         900     // average |sample| that opens the mouth (lower = more flapping)
 #define MOUTH_LAG_BLOCKS        3    // delay mouth vs audio (20 ms blocks) to match speaker latency
 #define MOUTH_MAX_OPEN_MS     350    // force a "flap" if held open longer
+#define PREBUFFER_MS          250    // queue this much reply audio before playing (smooths network hiccups)
 #define MIC_HOLDOFF_MS        400    // keep the mic muted this long after Billy stops talking (no self-echo)
 #define CONVO_IDLE_MS       45000    // end the chat if nobody says anything for this long
 #define END_GRACE_MS         8000    // after "goodbye", wait at most this long for Billy's farewell

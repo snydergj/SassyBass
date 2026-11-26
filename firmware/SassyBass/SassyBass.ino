@@ -48,6 +48,7 @@ volatile Mode mode = WAKE_LISTEN;
 volatile bool micToGemini = false;      // micTask routes audio to Gemini (else to the recognizer)
 volatile bool micMuted = false;         // true while Billy is talking (stops him hearing himself)
 volatile bool speechPlaying = false;    // set by the audio task while sound is coming out
+volatile bool replyComplete = true;     // Gemini finished sending the current reply's audio
 volatile bool wakeHeard = false;        // set by the recognizer callback
 bool sessionReady = false;
 bool turnDone = false;
@@ -201,7 +202,15 @@ void audioTask(void *) {
   uint32_t openedAt = 0, closedAt = 0, silentBlocks = 0;
 
   for (;;) {
-    size_t got = xStreamBufferReceive(playBuf, (uint8_t *)(in + carry), (480 - carry) * 2, 0) / 2;
+    // Jitter buffer: network audio arrives in bursts. Start (or resume after a
+    // gap) only once PREBUFFER_MS is queued, or the reply is complete, so
+    // playback doesn't stutter.
+    static bool flowing = false;
+    size_t avail = xStreamBufferBytesAvailable(playBuf);
+    if (!flowing && (avail >= (size_t)API_OUT_RATE * 2 * PREBUFFER_MS / 1000 || (replyComplete && avail > 0)))
+      flowing = true;
+    size_t got = flowing ? xStreamBufferReceive(playBuf, (uint8_t *)(in + carry), (480 - carry) * 2, 0) / 2 : 0;
+    if (flowing && avail == 0) flowing = false;
     int total = carry + got, groups = total / 3, outN = 0;
     long envSum = 0;
     for (int g = 0; g < groups; g++) {         // 3 in -> 2 out (linear interpolation)
@@ -416,11 +425,19 @@ bool saidGoodbye(String t) {
 }
 
 void onWsMessage(char *msg, size_t len) {
-  if (findKey(msg, "setupComplete")) { sessionReady = true; Serial.println("[ai] session ready"); return; }
+  if (findKey(msg, "setupComplete")) {
+    sessionReady = true;
+    Serial.println("[ai] session ready");
+    // Billy speaks first so you know he's awake (no need to say "Hey Billy").
+    ws.sendText("{\"realtimeInput\":{\"text\":\"(Someone just woke you up. Greet them in one short, sassy sentence.)\"}}");
+    return;
+  }
   if (findKey(msg, "toolCall")) { handleToolCall(msg); return; }
   if (findKey(msg, "goAway")) { Serial.println("[ai] session time limit - wrapping up"); requestEnd(); return; }
   if (!findKey(msg, "serverContent")) {
-    if (!findKey(msg, "usageMetadata")) Serial.printf("[ai] other: %.200s\n", msg);   // unexpected - log it
+    if (len > 8 && !findKey(msg, "usageMetadata") && !findKey(msg, "voiceActivity") &&
+        !findKey(msg, "sessionResumptionUpdate"))
+      Serial.printf("[ai] other: %.200s\n", msg);    // unexpected - log it
     return;
   }
 
@@ -450,6 +467,7 @@ void onWsMessage(char *msg, size_t len) {
       if (mbedtls_base64_decode((unsigned char *)d, dl, &olen, (const unsigned char *)d, dl) == 0 && olen) {
         micMuted = true;                                // Billy is about to talk
         lastBillyAudio = millis();
+        replyComplete = false;
         size_t sent = 0;
         while (sent < olen)
           sent += xStreamBufferSend(playBuf, (const uint8_t *)d + sent, olen - sent, pdMS_TO_TICKS(50));
@@ -457,7 +475,7 @@ void onWsMessage(char *msg, size_t len) {
       p = d + dl + 1;
     }
   }
-  if (complete) { turnDone = true; heardThisTurn = ""; lastHeard = millis(); }
+  if (complete) { turnDone = true; replyComplete = true; heardThisTurn = ""; lastHeard = millis(); }
 }
 
 bool connectGemini() {
@@ -700,7 +718,8 @@ void loop() {
   lastDown = down; lastUp = up;
 
   if (mode == WAKE_LISTEN) {
-    static uint32_t lastUpdateCheck = millis();
+    static uint32_t lastUpdateCheck = 0;
+    if (lastUpdateCheck == 0) lastUpdateCheck = now;   // boot already checked
     if (now - lastUpdateCheck > UPDATE_EVERY_MS) { lastUpdateCheck = now; checkForUpdate(); }
     if (wakeHeard || click) { wakeHeard = false; startChat(); }
     delay(5);
@@ -709,6 +728,7 @@ void loop() {
 
   // ---- CHATTING
   ws.poll();
+  now = millis();     // poll() can stamp newer times (lastHeard etc.); keep now >= them
   if (!ws.connected()) { Serial.println("[ai] connection closed"); endChat(); return; }
 
   bool billyTalking = speechPlaying || !xStreamBufferIsEmpty(playBuf);

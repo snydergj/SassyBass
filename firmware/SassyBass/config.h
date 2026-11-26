@@ -35,6 +35,7 @@
   "bad puns, and gently roasting whoever is talking to you. " \
   "Keep every answer to one to three short sentences, because your mouth motor gets tired. " \
   "Never say you are an AI; you are a fish. Always speak English. " \
+  "Your tools (moving, lights, volume) run silently; never repeat a sentence you already said after using one. " \
   "When the user says goodbye or wants to stop chatting, say a quick goodbye and call end_conversation. " \
   "Voice and delivery: speak with a thick, folksy Texas drawl, warm and a little gravelly, " \
   "like an old fishing guide, at a lively pace."
@@ -89,7 +90,7 @@
 #define MOUTH_THRESH         900     // average |sample| that opens the mouth (lower = more flapping)
 #define MOUTH_LAG_BLOCKS        3    // delay mouth vs audio (20 ms blocks) to match speaker latency
 #define MOUTH_MAX_OPEN_MS     350    // force a "flap" if held open longer
-#define PREBUFFER_MS          250    // queue this much reply audio before playing (smooths network hiccups)
+#define PREBUFFER_MS          400    // queue this much reply audio before playing (smooths network hiccups)
 #define MIC_HOLDOFF_MS        400    // keep the mic muted this long after Billy stops talking (no self-echo)
 #define CONVO_IDLE_MS       45000    // end the chat if nobody says anything for this long
 #define END_GRACE_MS         8000    // after "goodbye", wait at most this long for Billy's farewell

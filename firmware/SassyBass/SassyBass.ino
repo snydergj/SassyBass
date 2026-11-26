@@ -49,6 +49,7 @@ volatile bool micToGemini = false;      // micTask routes audio to Gemini (else 
 volatile bool micMuted = false;         // true while Billy is talking (stops him hearing himself)
 volatile bool speechPlaying = false;    // set by the audio task while sound is coming out
 volatile bool replyComplete = true;     // Gemini finished sending the current reply's audio
+volatile uint32_t audioGaps = 0;        // playback ran dry mid-reply (diagnostics)
 volatile bool wakeHeard = false;        // set by the recognizer callback
 bool sessionReady = false;
 bool turnDone = false;
@@ -210,7 +211,7 @@ void audioTask(void *) {
     if (!flowing && (avail >= (size_t)API_OUT_RATE * 2 * PREBUFFER_MS / 1000 || (replyComplete && avail > 0)))
       flowing = true;
     size_t got = flowing ? xStreamBufferReceive(playBuf, (uint8_t *)(in + carry), (480 - carry) * 2, 0) / 2 : 0;
-    if (flowing && avail == 0) flowing = false;
+    if (flowing && avail == 0) { flowing = false; if (!replyComplete) audioGaps++; }
     int total = carry + got, groups = total / 3, outN = 0;
     long envSum = 0;
     for (int g = 0; g < groups; g++) {         // 3 in -> 2 out (linear interpolation)
@@ -294,20 +295,20 @@ char *findStr(const char *from, const char *key, size_t &len) {
 // matching branch in runTool().
 static const char TOOL_DECLS[] PROGMEM = R"JSON(
 "tools":[{"functionDeclarations":[
-  {"name":"end_conversation",
+  {"name":"end_conversation","behavior":"NON_BLOCKING",
    "description":"End the chat. Call this when the user says goodbye, bye, see you later, or asks Billy to stop listening or go to sleep."},
-  {"name":"move_fish",
+  {"name":"move_fish","behavior":"NON_BLOCKING",
    "description":"Physically move Billy's body. Use when the user asks Billy to dance, wiggle, flap his tail, or turn his head.",
    "parameters":{"type":"OBJECT","properties":{
      "action":{"type":"STRING","enum":["flap_tail","turn_head","dance"]}},
      "required":["action"]}},
-  {"name":"set_volume",
+  {"name":"set_volume","behavior":"NON_BLOCKING",
    "description":"Change Billy's speaker volume. Use when the user says louder, quieter, turn it up/down, or names a volume level. The result reports the new volume.",
    "parameters":{"type":"OBJECT","properties":{
      "change":{"type":"STRING","enum":["louder","quieter","set"]},
      "level":{"type":"INTEGER","description":"0-100, only used when change is set"}},
      "required":["change"]}},
-  {"name":"set_light",
+  {"name":"set_light","behavior":"NON_BLOCKING",
    "description":"Set the color of Billy's status light.",
    "parameters":{"type":"OBJECT","properties":{
      "color":{"type":"STRING","enum":["red","green","blue","purple","white","off"]}},
@@ -391,7 +392,7 @@ void handleToolCall(char *msg) {
     if (responses.length()) responses += ",";
     responses += "{";
     if (id.length()) responses += "\"id\":\"" + id + "\",";
-    responses += "\"name\":\"" + name + "\",\"response\":{\"result\":\"" + jsonEscape(result.c_str()) + "\"}}";
+    responses += "\"name\":\"" + name + "\",\"response\":{\"result\":\"" + jsonEscape(result.c_str()) + "\",\"scheduling\":\"SILENT\"}}";
     const char *close = strchr(p, ']');                  // stop at the end of the functionCalls array
     const char *nextObj = strchr(p, '{');
     if (!nextObj || (close && close < nextObj)) break;
@@ -475,6 +476,7 @@ void onWsMessage(char *msg, size_t len) {
       p = d + dl + 1;
     }
   }
+  if (interrupted) replyComplete = true;
   if (complete) { turnDone = true; replyComplete = true; heardThisTurn = ""; lastHeard = millis(); }
 }
 
@@ -731,14 +733,23 @@ void loop() {
   now = millis();     // poll() can stamp newer times (lastHeard etc.); keep now >= them
   if (!ws.connected()) { Serial.println("[ai] connection closed"); endChat(); return; }
 
-  bool billyTalking = speechPlaying || !xStreamBufferIsEmpty(playBuf);
+  // Billy's turn lasts from his first audio until Gemini says the reply is
+  // complete AND the speaker has drained. The mic stays muted the whole time,
+  // even through network gaps, so he can't hear himself and interrupt
+  // (that caused the stutter-then-repeat behaviour).
+  bool billyTalking = speechPlaying || !xStreamBufferIsEmpty(playBuf) || !replyComplete;
+  static bool wasTalking = false;
   if (billyTalking) {
     lastBillyAudio = now;
-    headOut();                                         // head out while he talks
-    setLed(0, 40, 0);
+    if (!wasTalking) { headOut(); setLed(0, 40, 0); }  // head out while he talks
   } else if (now - lastBillyAudio > MIC_HOLDOFF_MS) {
     if (micMuted) { micMuted = false; xStreamBufferReset(micBuf); bodyRelax(); setLed(0, 0, 60); }
   }
+  if (wasTalking && !billyTalking && audioGaps) {
+    Serial.printf("[audio] reply had %u gap(s) - network slower than playback\n", (unsigned)audioGaps);
+    audioGaps = 0;
+  }
+  wasTalking = billyTalking;
 
   if (sessionReady && !micMuted) pumpMicAudio();
   else if (micMuted) xStreamBufferReset(micBuf);

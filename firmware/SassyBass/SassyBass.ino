@@ -503,6 +503,42 @@ bool talkPressed() {
   return digitalRead(TALK_BTN_PIN) == LOW || digitalRead(BOOT_BTN_PIN) == LOW || exioKeyDown(EXIO_KEY2);
 }
 
+// ---------------------------------------------------------------- wake recognizer
+static void printHeap(const char *tag) {
+  Serial.printf("[mem] %s: internal free %u (largest %u), PSRAM free %u\n", tag,
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+// Starts ESP-SR. If it ever crashes the board, it stays off for this firmware
+// version (button-only mode) so a gift fish can never get stuck in a reboot
+// loop. A new firmware version tries again.
+void startWakeRecognizer() {
+  prefs.begin("billy", false);
+  if (prefs.getBool("srtry", false) && esp_reset_reason() == ESP_RST_PANIC)
+    prefs.putString("srbad", FW_VERSION);              // crashed during the last attempt
+  prefs.putBool("srtry", false);
+  bool disabled = prefs.getString("srbad", "") == FW_VERSION;
+  if (!disabled) prefs.putBool("srtry", true);
+  prefs.end();
+  if (disabled) {
+    Serial.println("!! Wake phrase crashed on this firmware before - disabled. Button still works.");
+    return;
+  }
+
+  printHeap("before wake recognizer");
+  const char *fmt = MIC_CHANNEL == 0 ? "MN" : "NM";
+  srOk = sr_start(srFill, NULL, SR_CHANNELS_STEREO, SR_MODE_COMMAND, fmt,
+                  wakeCommands, sizeof(wakeCommands) / sizeof(wakeCommands[0]), srEvent, NULL) == ESP_OK;
+  printHeap("after wake recognizer");
+  if (!srOk) Serial.println("!! Wake phrase unavailable - check Partition Scheme = ESP SR 16M. Button still works.");
+
+  prefs.begin("billy", false);
+  prefs.putBool("srtry", false);
+  prefs.end();
+}
+
 // ---------------------------------------------------------------- setup
 void setup() {
   Serial.begin(115200);
@@ -545,6 +581,8 @@ void setup() {
     setLed(30, 0, 40); startPortal(); return;
   }
 
+  startWakeRecognizer();   // before Wi-Fi/TLS, while internal RAM is still plentiful
+
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
@@ -559,12 +597,6 @@ void setup() {
   Serial.println("Wi-Fi OK: " + WiFi.localIP().toString());
   checkForUpdate();                                    // reboots if a newer release was installed
 
-  // Offline wake-phrase recognizer
-  const char *fmt = MIC_CHANNEL == 0 ? "MN" : "NM";
-  srOk = sr_start(srFill, NULL, SR_CHANNELS_STEREO, SR_MODE_COMMAND, fmt,
-                  wakeCommands, sizeof(wakeCommands) / sizeof(wakeCommands[0]), srEvent, NULL) == ESP_OK;
-  if (!srOk) Serial.println("!! Wake phrase unavailable - check Partition Scheme = ESP SR 16M. Button still works.");
-
   headOut(); delay(500); bodyRelax(); tailOut(); delay(250); bodyRelax();   // hello wiggle
   listenForWake();
 }
@@ -572,6 +604,7 @@ void setup() {
 // ---------------------------------------------------------------- loop
 // USB serial commands:  key=AIza...   (save Gemini key)
 //                       wifi=SSID,password
+//                       wake=reset  (re-enable a wake phrase that was disabled after a crash)
 //                       restart
 void serialCommands() {
   if (!Serial.available()) return;
@@ -587,10 +620,13 @@ void serialCommands() {
     wifiPass = comma < 0 ? "" : line.substring(comma + 1);
     saveSettings();
     Serial.println("Wi-Fi saved. Type restart to apply.");
+  } else if (line == "wake=reset") {
+    prefs.begin("billy", false); prefs.remove("srbad"); prefs.end();
+    Serial.println("Wake phrase re-enabled. Type restart to apply.");
   } else if (line == "restart") {
     ESP.restart();
   } else if (line.length()) {
-    Serial.println("Commands: key=..., wifi=SSID,password, restart");
+    Serial.println("Commands: key=..., wifi=SSID,password, wake=reset, restart");
   }
 }
 

@@ -82,7 +82,8 @@
 // ---------- Wake phrase (offline, ESP-SR command recognizer) ----------
 // Needs Tools > Partition Scheme > "ESP SR 16M (3MB APP/6MB SPIFFS/3.9MB MODEL)".
 // Plain English text; add a few variants so it catches how people actually say it.
-#define WAKE_PHRASES   { {0, "hey billy"}, {0, "hi billy"}, {0, "hello billy"}, {0, "billy bass"} }
+// Upper-case words only: no digits or punctuation.
+#define WAKE_PHRASES   { {0, "HEY BILLY"}, {0, "HI BILLY"}, {0, "HELLO BILLY"} }
 
 // ---------- Behaviour ----------
 #define SPEAKER_VOLUME        80     // 0-100 starting volume (voice/button changes are remembered)

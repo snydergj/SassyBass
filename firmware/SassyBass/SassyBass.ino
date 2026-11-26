@@ -242,9 +242,27 @@ void wakeStop() {
 // Speaker task: always writes 20 ms blocks (silence when idle) so I2S never
 // replays stale data. Resamples 24 kHz -> 16 kHz and drives the mouth.
 void audioTask(void *) {
-  static int16_t in[480 + 3];                  // 20 ms @ 24 kHz (+ carry)
+  // 24 kHz -> 16 kHz with a proper anti-alias filter (polyphase FIR:
+  // upsample x2, low-pass at 7.2 kHz, keep every 3rd sample). The old
+  // "average two samples" shortcut folded everything above 8 kHz back into
+  // the audible band, which made S/F sounds crackle ("six", "seven"...).
+  const int TAPS = 64, HIST = TAPS / 2;
+  static float h[TAPS];
+  static float xin[HIST + 480];                // HIST samples of history + one block
+  static int16_t raw[480];
   static int16_t out[320 * 2];                 // 20 ms @ 16 kHz stereo
-  int carry = 0;
+  {
+    const float fc = 7200.0f / 48000.0f;
+    float sum = 0;
+    for (int k = 0; k < TAPS; k++) {
+      float m = k - (TAPS - 1) / 2.0f;
+      float sinc = m == 0 ? 2 * fc : sinf(2 * PI * fc * m) / (PI * m);
+      float w = 0.42f - 0.5f * cosf(2 * PI * k / (TAPS - 1)) + 0.08f * cosf(4 * PI * k / (TAPS - 1));  // Blackman
+      h[k] = sinc * w; sum += h[k];
+    }
+    for (int k = 0; k < TAPS; k++) h[k] *= 2.0f / sum;   // x2 gain makes up for zero-stuffing
+    memset(xin, 0, sizeof(xin));
+  }
   int envHist[MOUTH_LAG_BLOCKS + 1] = {0};
   int envIdx = 0;
   bool mouthOpen = false;
@@ -252,31 +270,31 @@ void audioTask(void *) {
 
   for (;;) {
     // Jitter buffer: network audio arrives in bursts. Start (or resume after a
-    // gap) only once PREBUFFER_MS is queued, or the reply is complete, so
-    // playback doesn't stutter.
+    // gap) only once PREBUFFER_MS is queued, or the reply is complete.
     static bool flowing = false;
     size_t avail = xStreamBufferBytesAvailable(playBuf);
     if (!flowing && (avail >= (size_t)API_OUT_RATE * 2 * PREBUFFER_MS / 1000 || (replyComplete && avail > 0)))
       flowing = true;
-    size_t need = (480 - carry) * 2;
-    // Never play a partial block mid-reply: padding it with silence makes
-    // tiny clicks/stutters. Treat "not enough for a full block" as a gap and
-    // re-buffer instead (the end of a reply may be partial).
-    if (flowing && avail < need && !replyComplete) { flowing = false; audioGaps++; }
+    const size_t need = sizeof(raw);
+    if (flowing && avail < need && !replyComplete) { flowing = false; audioGaps++; }   // re-buffer, never pad mid-reply
     if (flowing && avail == 0) flowing = false;
-    size_t got = flowing ? xStreamBufferReceive(playBuf, (uint8_t *)(in + carry), need, 0) / 2 : 0;
-    int total = carry + got, groups = total / 3, outN = 0;
+    size_t got = flowing ? xStreamBufferReceive(playBuf, (uint8_t *)raw, need, 0) / 2 : 0;
+    for (size_t i = got; i < 480; i++) raw[i] = 0;          // end of a reply: finish with silence
+
+    for (int i = 0; i < 480; i++) xin[HIST + i] = raw[i];
     long envSum = 0;
-    for (int g = 0; g < groups; g++) {         // 3 in -> 2 out (linear interpolation)
-      int16_t a = in[g * 3], b = in[g * 3 + 1], c = in[g * 3 + 2];
-      int16_t o0 = a, o1 = (int16_t)(((int)b + c) / 2);
-      out[outN * 2] = out[outN * 2 + 1] = o0; outN++;
-      out[outN * 2] = out[outN * 2 + 1] = o1; outN++;
-      envSum += abs(o0) + abs(o1);
+    for (int m = 0; m < 320; m++) {
+      int p = 3 * m + 2 * HIST;                // position in the 48 kHz (zero-stuffed) timeline
+      float acc = 0;
+      for (int k = (p & 1); k < TAPS; k += 2)  // only even positions hold real samples
+        acc += h[k] * xin[(p - k) >> 1];
+      int v = (int)acc;
+      if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
+      out[m * 2] = out[m * 2 + 1] = (int16_t)v;
+      envSum += abs(v);
     }
-    carry = total - groups * 3;
-    for (int i = 0; i < carry; i++) in[i] = in[groups * 3 + i];
-    for (int i = outN; i < 320; i++) out[i * 2] = out[i * 2 + 1] = 0;   // pad with silence
+    memmove(xin, xin + 480, HIST * sizeof(float));
+    int outN = got ? 320 : 0;
 
     static uint32_t lastWrite = 0;
     uint32_t tw = millis();
@@ -520,7 +538,11 @@ void onWsMessage(char *msg, size_t len) {
     }
   }
   const char *ot = findKey(msg, "outputTranscription");
-  if (ot) { size_t tl; char *t = findStr(ot, "text", tl); if (t) { Serial.print("[billy] "); Serial.write(t, tl); Serial.println(); } }
+  if (ot) {
+    size_t tl; char *t = findStr(ot, "text", tl);
+    bool placeholder = t && (strncmp(t, "\\u003c!--", 10) == 0 || strncmp(t, "<!--", 4) == 0);   // Gemini's "empty response" marker
+    if (t && !placeholder) { Serial.print("[billy] "); Serial.write(t, tl); Serial.println(); }
+  }
   if (interrupted) flushPlayback();
 
   if (!interrupted) {

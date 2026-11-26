@@ -105,6 +105,11 @@ void es7210Init() {
   es7210Write(0x00, 0x71); es7210Write(0x00, 0x41);            // enable
 }
 
+// The codec's 0-100 scale is linear in dB from -95 dB to +32 dB, so "40" was
+// nearly silent and "80" added gain that can clip. Map Billy's 0-100 onto the
+// useful range (about -32 dB .. 0 dB).
+int codecVolume(int v) { return v <= 0 ? 0 : 50 + v / 4; }
+
 void es8311Init() {
   es8311 = es8311_create(I2C_NUM_0, ES8311_ADDRRES_0);
   es8311_clock_config_t clk = {};
@@ -114,12 +119,12 @@ void es8311Init() {
   clk.sample_frequency = I2S_RATE;
   es8311_init(es8311, &clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16);
   es8311_microphone_config(es8311, false);
-  es8311_voice_volume_set(es8311, volume, NULL);
+  es8311_voice_volume_set(es8311, codecVolume(volume), NULL);
 }
 
 void setVolume(int v) {
   volume = constrain(v, 0, 100);
-  es8311_voice_volume_set(es8311, volume, NULL);
+  es8311_voice_volume_set(es8311, codecVolume(volume), NULL);
   prefs.begin("billy", false);
   prefs.putInt("vol", volume);
   prefs.end();
@@ -187,8 +192,12 @@ void wakeFeedTask(void *) {
 
 void wakeDetectTask(void *) {
   for (;;) {
+    // While chatting the front end gets no audio. Sleep instead of polling it:
+    // its fetch() can return immediately with a timeout, and spinning here
+    // stole CPU from the speaker task (the source of the stutter).
+    if (micToGemini) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
     afe_fetch_result_t *res = afe->fetch(afeData);
-    if (!res || res->ret_value == ESP_FAIL) { vTaskDelay(10); continue; }
+    if (!res || res->ret_value != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
     if (res->wakeup_state == WAKENET_DETECTED && !micToGemini) wakeHeard = true;
   }
 }
@@ -601,8 +610,8 @@ void startWakeRecognizer() {
     }
     srOk = afe && afeData;
     if (srOk) {
-      xTaskCreatePinnedToCore(wakeFeedTask, "wakeFeed", 4096, NULL, 5, NULL, 0);
-      xTaskCreatePinnedToCore(wakeDetectTask, "wakeDetect", 6144, NULL, 5, NULL, 1);
+      xTaskCreatePinnedToCore(wakeFeedTask, "wakeFeed", 4096, NULL, 3, NULL, 0);
+      xTaskCreatePinnedToCore(wakeDetectTask, "wakeDetect", 6144, NULL, 2, NULL, 0);
     } else {
       Serial.println("!! Wake word failed to start. Button still works.");
     }
@@ -646,8 +655,8 @@ void setup() {
   srBuf = xStreamBufferCreateStatic(srSize, 1, (uint8_t *)ps_malloc(srSize + 1), &srSB);
   playBuf = xStreamBufferCreateStatic(playSize, 1, (uint8_t *)ps_malloc(playSize + 1), &playSB);
 
-  xTaskCreatePinnedToCore(audioTask, "audio", 6144, NULL, 5, NULL, 1);
-  xTaskCreatePinnedToCore(micTask, "mic", 4096, NULL, 6, NULL, 1);
+  xTaskCreatePinnedToCore(audioTask, "audio", 6144, NULL, 10, NULL, 1);   // speaker: highest
+  xTaskCreatePinnedToCore(micTask, "mic", 4096, NULL, 9, NULL, 1);
   ws.onMessage(onWsMessage);
 
   bool forceSetup = digitalRead(TALK_BTN_PIN) == LOW || exioKeyDown(EXIO_KEY1);

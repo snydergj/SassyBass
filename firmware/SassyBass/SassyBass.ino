@@ -59,6 +59,7 @@ uint8_t oddByte = 0; bool haveOddByte = false;
 const size_t CAP_IN_MAX = API_OUT_RATE * 20, CAP_OUT_MAX = I2S_RATE * 20;   // 20 s each
 int16_t *capIn = nullptr, *capOut = nullptr;
 volatile size_t capInLen = 0, capOutLen = 0;
+void startStationWeb();
 volatile bool wakeHeard = false;        // set by the recognizer callback
 bool sessionReady = false;
 bool turnDone = false;

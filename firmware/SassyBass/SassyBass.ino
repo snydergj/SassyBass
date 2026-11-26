@@ -50,6 +50,10 @@ volatile bool micMuted = false;         // true while Billy is talking (stops hi
 volatile bool speechPlaying = false;    // set by the audio task while sound is coming out
 volatile bool replyComplete = true;     // Gemini finished sending the current reply's audio
 volatile uint32_t audioGaps = 0;        // playback ran dry mid-reply (diagnostics)
+// Per-reply audio diagnostics, printed when Billy finishes talking
+volatile uint32_t stChunks = 0, stBytes = 0, stBadChunks = 0, stOddChunks = 0;
+volatile uint32_t stLateWrites = 0, stMaxWriteGapMs = 0, stMinBufMs = 99999;
+uint8_t oddByte = 0; bool haveOddByte = false;
 volatile bool wakeHeard = false;        // set by the recognizer callback
 bool sessionReady = false;
 bool turnDone = false;
@@ -274,7 +278,17 @@ void audioTask(void *) {
     for (int i = 0; i < carry; i++) in[i] = in[groups * 3 + i];
     for (int i = outN; i < 320; i++) out[i * 2] = out[i * 2 + 1] = 0;   // pad with silence
 
+    static uint32_t lastWrite = 0;
+    uint32_t tw = millis();
+    if (flowing && lastWrite) {
+      uint32_t gapMs = tw - lastWrite;
+      if (gapMs > stMaxWriteGapMs) stMaxWriteGapMs = gapMs;
+      if (gapMs > 40) stLateWrites++;
+      uint32_t bufMs = avail * 1000 / (API_OUT_RATE * 2);
+      if (bufMs < stMinBufMs) stMinBufMs = bufMs;
+    }
     i2s.write((uint8_t *)out, sizeof(out));    // blocks ~20 ms: paces this task
+    lastWrite = millis();
 
     // ----- lip sync (delayed to match DMA/speaker latency)
     envHist[envIdx] = outN ? envSum / outN : 0;
@@ -514,13 +528,25 @@ void onWsMessage(char *msg, size_t len) {
     size_t dl;
     while (char *d = findStr(p, "data", dl)) {
       size_t olen = 0;
-      if (mbedtls_base64_decode((unsigned char *)d, dl, &olen, (const unsigned char *)d, dl) == 0 && olen) {
+      int rc = mbedtls_base64_decode((unsigned char *)d, dl, &olen, (const unsigned char *)d, dl);
+      if (rc != 0) {
+        stBadChunks++;
+        Serial.printf("[audio] base64 decode failed (%d), %u chars, starts: %.24s\n", rc, (unsigned)dl, d);
+      } else if (olen) {
         micMuted = true;                                // Billy is about to talk
         lastBillyAudio = millis();
         replyComplete = false;
+        stChunks++; stBytes += olen;
+        uint8_t *bytes = (uint8_t *)d;
+        if (haveOddByte) {                              // finish a sample split across chunks
+          uint8_t pair[2] = {oddByte, bytes[0]};
+          while (xStreamBufferSend(playBuf, pair, 2, pdMS_TO_TICKS(50)) != 2) {}
+          bytes++; olen--; haveOddByte = false;
+        }
+        if (olen & 1) { stOddChunks++; oddByte = bytes[olen - 1]; haveOddByte = true; olen--; }
         size_t sent = 0;
         while (sent < olen)
-          sent += xStreamBufferSend(playBuf, (const uint8_t *)d + sent, olen - sent, pdMS_TO_TICKS(50));
+          sent += xStreamBufferSend(playBuf, bytes + sent, olen - sent, pdMS_TO_TICKS(50));
       }
       p = d + dl + 1;
     }
@@ -801,9 +827,13 @@ void loop() {
   } else if (now - lastBillyAudio > MIC_HOLDOFF_MS) {
     if (micMuted) { micMuted = false; xStreamBufferReset(micBuf); bodyRelax(); setLed(0, 0, 60); }
   }
-  if (wasTalking && !billyTalking && audioGaps) {
-    Serial.printf("[audio] reply had %u gap(s) - network slower than playback\n", (unsigned)audioGaps);
-    audioGaps = 0;
+  if (wasTalking && !billyTalking) {
+    Serial.printf("[audio] reply: %u chunks, %u ms audio, gaps %u, bad %u, odd %u, late writes %u (max %u ms), min buffer %u ms\n",
+                  (unsigned)stChunks, (unsigned)(stBytes * 1000 / (API_OUT_RATE * 2)), (unsigned)audioGaps,
+                  (unsigned)stBadChunks, (unsigned)stOddChunks, (unsigned)stLateWrites, (unsigned)stMaxWriteGapMs,
+                  (unsigned)(stMinBufMs == 99999 ? 0 : stMinBufMs));
+    audioGaps = stChunks = stBytes = stBadChunks = stOddChunks = stLateWrites = stMaxWriteGapMs = 0;
+    stMinBufMs = 99999;
   }
   wasTalking = billyTalking;
 

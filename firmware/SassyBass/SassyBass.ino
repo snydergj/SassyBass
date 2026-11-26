@@ -54,7 +54,10 @@ volatile bool wakeHeard = false;        // set by the recognizer callback
 bool sessionReady = false;
 bool turnDone = false;
 bool endRequested = false;
-bool srOk = false;
+bool srOk = false;                      // wake-word models loaded and engine works
+srmodel_list_t *srModels = nullptr;
+volatile bool wakeRunning = false;      // wake engine running (only while waiting for "Hi ESP")
+volatile int wakeTasksAlive = 0;
 uint32_t endRequestedAt = 0, lastHeard = 0, lastBillyAudio = 0;
 String heardThisTurn;
 
@@ -178,9 +181,6 @@ void micTask(void *) {
 // Wake-word engine (Espressif AFE + WakeNet). It is started only while we
 // wait for "Hi ESP" and completely torn down during a chat, so nothing of it
 // runs (or holds RAM) while Billy is talking.
-srmodel_list_t *srModels = nullptr;
-volatile bool wakeRunning = false;     // tasks should keep going
-volatile int wakeTasksAlive = 0;
 
 void wakeFeedTask(void *) {
   int chunk = afe->get_feed_chunksize(afeData);

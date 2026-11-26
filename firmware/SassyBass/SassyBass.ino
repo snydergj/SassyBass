@@ -169,37 +169,70 @@ void micTask(void *) {
       size_t n = got / 4;
       for (size_t i = 0; i < n; i++) mono[i] = frame[i * 2 + MIC_CHANNEL];
       xStreamBufferSend(micBuf, mono, n * 2, 0);
-    } else if (srOk) {
+    } else if (wakeRunning) {
       xStreamBufferSend(srBuf, frame, got, 0);
     }
   }
 }
 
-// Wake-word tasks: feed mic audio into Espressif's audio front end, and
-// watch its WakeNet output. Runs only while we're waiting for the wake word.
+// Wake-word engine (Espressif AFE + WakeNet). It is started only while we
+// wait for "Hi ESP" and completely torn down during a chat, so nothing of it
+// runs (or holds RAM) while Billy is talking.
+srmodel_list_t *srModels = nullptr;
+volatile bool wakeRunning = false;     // tasks should keep going
+volatile int wakeTasksAlive = 0;
+
 void wakeFeedTask(void *) {
   int chunk = afe->get_feed_chunksize(afeData);
   int ch = afe->get_feed_channel_num(afeData);
   size_t bytes = chunk * ch * sizeof(int16_t);
   int16_t *buf = (int16_t *)heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  Serial.printf("[wake] feed chunk %d x %d ch\n", chunk, ch);
-  for (;;) {
-    size_t got = 0;
-    while (got < bytes) got += xStreamBufferReceive(srBuf, (uint8_t *)buf + got, bytes - got, portMAX_DELAY);
-    afe->feed(afeData, buf);
+  size_t got = 0;
+  while (wakeRunning) {
+    got += xStreamBufferReceive(srBuf, (uint8_t *)buf + got, bytes - got, pdMS_TO_TICKS(100));
+    if (got == bytes) { afe->feed(afeData, buf); got = 0; }
   }
+  memset(buf, 0, bytes);                         // a few silent chunks let fetch() return
+  for (int i = 0; i < 4; i++) afe->feed(afeData, buf);
+  free(buf);
+  wakeTasksAlive--;
+  vTaskDelete(NULL);
 }
 
 void wakeDetectTask(void *) {
-  for (;;) {
-    // While chatting the front end gets no audio. Sleep instead of polling it:
-    // its fetch() can return immediately with a timeout, and spinning here
-    // stole CPU from the speaker task (the source of the stutter).
-    if (micToGemini) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+  while (wakeRunning) {
     afe_fetch_result_t *res = afe->fetch(afeData);
     if (!res || res->ret_value != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
-    if (res->wakeup_state == WAKENET_DETECTED && !micToGemini) wakeHeard = true;
+    if (res->wakeup_state == WAKENET_DETECTED && wakeRunning) wakeHeard = true;
   }
+  wakeTasksAlive--;
+  vTaskDelete(NULL);
+}
+
+bool wakeStart() {
+  if (!srModels || wakeRunning) return wakeRunning;
+  afe_config_t *cfg = afe_config_init(MIC_CHANNEL == 0 ? "MN" : "NM", srModels, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+  if (!cfg) return false;
+  afe = esp_afe_handle_from_config(cfg);
+  afeData = afe ? afe->create_from_config(cfg) : nullptr;
+  afe_config_free(cfg);
+  if (!afeData) return false;
+  xStreamBufferReset(srBuf);
+  wakeRunning = true;
+  wakeTasksAlive = 2;
+  xTaskCreatePinnedToCore(wakeFeedTask, "wakeFeed", 4096, NULL, 3, NULL, 0);
+  xTaskCreatePinnedToCore(wakeDetectTask, "wakeDetect", 6144, NULL, 2, NULL, 0);
+  return true;
+}
+
+void wakeStop() {
+  if (!wakeRunning) return;
+  wakeRunning = false;
+  uint32_t t0 = millis();
+  while (wakeTasksAlive > 0 && millis() - t0 < 2000) delay(10);
+  if (wakeTasksAlive > 0) { Serial.println("[wake] tasks didn't stop - leaving engine loaded"); return; }
+  afe->destroy(afeData);
+  afeData = nullptr;
 }
 
 // Speaker task: always writes 20 ms blocks (silence when idle) so I2S never
@@ -533,7 +566,8 @@ void listenForWake() {
   xStreamBufferReset(srBuf);
   bodyRelax();
   setLed(0, 0, 0);
-  Serial.println(srOk ? "[wake] listening for \"Hi E-S-P\"" : "[wake] wake word off - use the button");
+  bool on = srOk && wakeStart();
+  Serial.println(on ? "[wake] listening for \"Hi E-S-P\"" : "[wake] wake word off - use the button");
 }
 
 void startChat() {
@@ -543,6 +577,7 @@ void startChat() {
   flushPlayback();
   micMuted = false;
   micToGemini = true;                 // mic audio buffers while we connect
+  wakeStop();                         // free the CPU and RAM the wake engine uses
   endRequested = false;
   turnDone = false;
   heardThisTurn = "";
@@ -597,24 +632,12 @@ void startWakeRecognizer() {
   }
 
   printHeap("before wake recognizer");
-  srmodel_list_t *models = esp_srmodel_init("model");
-  if (!models || models->num == 0) {
+  srModels = esp_srmodel_init("model");
+  if (!srModels || srModels->num == 0) {
     Serial.println("!! No speech models found - check Partition Scheme = ESP SR 16M. Button still works.");
   } else {
-    afe_config_t *cfg = afe_config_init(MIC_CHANNEL == 0 ? "MN" : "NM", models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
-    if (cfg) {
-      Serial.printf("[wake] model: %s\n", cfg->wakenet_model_name ? cfg->wakenet_model_name : "(none)");
-      afe = esp_afe_handle_from_config(cfg);
-      afeData = afe ? afe->create_from_config(cfg) : nullptr;
-      afe_config_free(cfg);
-    }
-    srOk = afe && afeData;
-    if (srOk) {
-      xTaskCreatePinnedToCore(wakeFeedTask, "wakeFeed", 4096, NULL, 3, NULL, 0);
-      xTaskCreatePinnedToCore(wakeDetectTask, "wakeDetect", 6144, NULL, 2, NULL, 0);
-    } else {
-      Serial.println("!! Wake word failed to start. Button still works.");
-    }
+    srOk = wakeStart();               // first start inside the crash guard
+    if (!srOk) Serial.println("!! Wake word failed to start. Button still works.");
   }
   printHeap("after wake recognizer");
 

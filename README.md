@@ -1,6 +1,6 @@
 # SassyBass 🐟
 
-A Big Mouth Billy Bass turned into a hands-free AI chatbot. Say **"Hey Billy"**, chat, and say **"goodbye"** when you're done.
+A Big Mouth Billy Bass turned into a hands-free AI chatbot. Say **"Hi E-S-P"** (the wake word), chat, and say **"goodbye"** when you're done.
 
 - **Board:** Waveshare ESP32-S3-AUDIO-Board, with a DRV8833 driving the mouth and body motors
 - **AI:** Google Gemini Live API (free tier)
@@ -59,7 +59,7 @@ The key is stored only in the fish's settings storage (NVS). **It is never in th
 
 ## Using it
 
-- Say **"Hey Billy"**, chat, and say **"goodbye"** to end. The chat also ends after 45 seconds of silence.
+- Say **"Hi E-S-P"** (the wake word), chat, and say **"goodbye"** to end. The chat also ends after 45 seconds of silence.
 - The red button (or BOOT or K2) starts or ends a chat.
 - Ask for louder or quieter, or press K1 (down) / K3 (up).
 - Ask him to dance, flap his tail, or change his light color. These are Gemini function calls handled in `runTool()`.

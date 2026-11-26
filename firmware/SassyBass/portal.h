@@ -103,7 +103,7 @@ void handleSave() {
   saveSettings();
   web.send(200, "text/html", String(FPSTR(PAGE_HEAD)) +
            "<p>Thanks! I'm joining <b>" + htmlEscape(wifiSsid) + "</b> now.</p>"
-           "<p>Say <b>\"Hey Billy\"</b> and start chatting. If my light turns purple again, "
+           "<p>Say <b>\"Hi E-S-P\"</b> and start chatting. If my light turns purple again, "
            "the password didn't work, so join <b>" SETUP_AP_SSID "</b> and try again.</p></body></html>");
   delay(1500);
   ESP.restart();

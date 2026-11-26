@@ -3,7 +3,7 @@
 //  https://github.com/snydergj/SassyBass
 //  Waveshare ESP32-S3-AUDIO-Board + DRV8833 + Google Gemini Live API
 //
-//  Say "Hey Billy" -> chat back and forth -> say "goodbye".
+//  Say "Hi E-S-P" (Espressif's built-in wake word) -> chat -> say "goodbye".
 //  The red button (or BOOT / K2) also starts or ends a chat.
 //
 //  Arduino IDE settings:
@@ -20,7 +20,13 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <ESP_I2S.h>
-#include <ESP_SR.h>
+#include <ESP_SR.h>          // pulls in the speech models (srmodels.bin) and esp-sr libraries
+extern "C" {
+#include "esp_afe_sr_models.h"
+#include "esp_afe_sr_iface.h"
+#include "esp_wn_iface.h"
+#include "model_path.h"
+}
 #include <freertos/stream_buffer.h>
 #include "es8311.h"
 #include "config.h"
@@ -43,7 +49,6 @@ volatile bool micToGemini = false;      // micTask routes audio to Gemini (else 
 volatile bool micMuted = false;         // true while Billy is talking (stops him hearing himself)
 volatile bool speechPlaying = false;    // set by the audio task while sound is coming out
 volatile bool wakeHeard = false;        // set by the recognizer callback
-volatile bool srTimedOut = false;
 bool sessionReady = false;
 bool turnDone = false;
 bool endRequested = false;
@@ -51,7 +56,8 @@ bool srOk = false;
 uint32_t endRequestedAt = 0, lastHeard = 0, lastBillyAudio = 0;
 String heardThisTurn;
 
-static const sr_cmd_t wakeCommands[] = WAKE_PHRASES;
+const esp_afe_sr_iface_t *afe = nullptr;   // wake-word front end (WakeNet only, no MultiNet)
+esp_afe_sr_data_t *afeData = nullptr;
 int volume = SPEAKER_VOLUME;            // 0-100, saved across power cycles
 
 // ---------------------------------------------------------------- helpers
@@ -160,19 +166,27 @@ void micTask(void *) {
   }
 }
 
-// Feeds the wake recognizer from srBuf (called by ESP-SR's own task).
-esp_err_t srFill(void *, void *out, size_t len, size_t *bytesRead, uint32_t timeoutMs) {
-  size_t got = 0;
-  while (got < len) {
-    got += xStreamBufferReceive(srBuf, (uint8_t *)out + got, len - got, pdMS_TO_TICKS(1000));
+// Wake-word tasks: feed mic audio into Espressif's audio front end, and
+// watch its WakeNet output. Runs only while we're waiting for the wake word.
+void wakeFeedTask(void *) {
+  int chunk = afe->get_feed_chunksize(afeData);
+  int ch = afe->get_feed_channel_num(afeData);
+  size_t bytes = chunk * ch * sizeof(int16_t);
+  int16_t *buf = (int16_t *)heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  Serial.printf("[wake] feed chunk %d x %d ch\n", chunk, ch);
+  for (;;) {
+    size_t got = 0;
+    while (got < bytes) got += xStreamBufferReceive(srBuf, (uint8_t *)buf + got, bytes - got, portMAX_DELAY);
+    afe->feed(afeData, buf);
   }
-  *bytesRead = got;
-  return ESP_OK;
 }
 
-void srEvent(void *, sr_event_t event, int commandId, int phraseId) {
-  if (event == SR_EVENT_COMMAND) wakeHeard = true;
-  else if (event == SR_EVENT_TIMEOUT) srTimedOut = true;
+void wakeDetectTask(void *) {
+  for (;;) {
+    afe_fetch_result_t *res = afe->fetch(afeData);
+    if (!res || res->ret_value == ESP_FAIL) { vTaskDelay(10); continue; }
+    if (res->wakeup_state == WAKENET_DETECTED && !micToGemini) wakeHeard = true;
+  }
 }
 
 // Speaker task: always writes 20 ms blocks (silence when idle) so I2S never
@@ -334,28 +348,46 @@ String runTool(const String &name, const char *callJson) {
   return "unknown function";
 }
 
-// toolCall: {"toolCall":{"functionCalls":[{"id":"..","name":"..","args":{..}}, ...]}}
+// Returns the end of the JSON object starting at p ('{'), skipping strings.
+static const char *objectEnd(const char *p) {
+  int depth = 0; bool inStr = false;
+  for (; *p; p++) {
+    if (inStr) { if (*p == '\\' && p[1]) p++; else if (*p == '"') inStr = false; continue; }
+    if (*p == '"') inStr = true;
+    else if (*p == '{') depth++;
+    else if (*p == '}' && --depth == 0) return p;
+  }
+  return nullptr;
+}
+
+// toolCall: {"toolCall":{"functionCalls":[{"name":"..","args":{..},"id":".."}, ...]}}
+// Key order varies, so each call object is cut out and searched on its own.
 void handleToolCall(char *msg) {
   String responses;
-  const char *p = msg;
-  size_t l;
-  while (true) {
-    char *idp = findStr(p, "id", l);
-    if (!idp) break;
-    String id(idp, l);
-    char *np = findStr(idp, "name", l);
-    if (!np) break;
+  const char *p = findKey(msg, "functionCalls");
+  if (p) p = strchr(p, '[');
+  while (p && (p = strchr(p, '{'))) {
+    const char *e = objectEnd(p);
+    if (!e) break;
+    String one(p, e - p + 1);
+    p = e + 1;
+    size_t l;
+    char *np = findStr(one.c_str(), "name", l);
+    if (!np) continue;
     String name(np, l);
-    const char *next = strstr(np, "\"id\"");
-    String one = next ? String(np).substring(0, next - np) : String(np);
+    char *idp = findStr(one.c_str(), "id", l);
+    String id = idp ? String(idp, l) : "";
     String result = runTool(name, one.c_str());
     Serial.printf("[tool] %s -> %s\n", name.c_str(), result.c_str());
     if (responses.length()) responses += ",";
-    responses += "{\"id\":\"" + id + "\",\"name\":\"" + name +
-                 "\",\"response\":{\"result\":\"" + jsonEscape(result.c_str()) + "\"}}";
-    if (!next) break;
-    p = next;
+    responses += "{";
+    if (id.length()) responses += "\"id\":\"" + id + "\",";
+    responses += "\"name\":\"" + name + "\",\"response\":{\"result\":\"" + jsonEscape(result.c_str()) + "\"}}";
+    const char *close = strchr(p, ']');                  // stop at the end of the functionCalls array
+    const char *nextObj = strchr(p, '{');
+    if (!nextObj || (close && close < nextObj)) break;
   }
+  if (responses.isEmpty()) { Serial.println("[tool] couldn't parse call"); return; }
   ws.sendText("{\"toolResponse\":{\"functionResponses\":[" + responses + "]}}");
 }
 
@@ -387,7 +419,10 @@ void onWsMessage(char *msg, size_t len) {
   if (findKey(msg, "setupComplete")) { sessionReady = true; Serial.println("[ai] session ready"); return; }
   if (findKey(msg, "toolCall")) { handleToolCall(msg); return; }
   if (findKey(msg, "goAway")) { Serial.println("[ai] session time limit - wrapping up"); requestEnd(); return; }
-  if (!findKey(msg, "serverContent")) return;
+  if (!findKey(msg, "serverContent")) {
+    if (!findKey(msg, "usageMetadata")) Serial.printf("[ai] other: %.200s\n", msg);   // unexpected - log it
+    return;
+  }
 
   // Read the text fields first: decoding audio in place scrambles the text after it.
   bool interrupted = findKey(msg, "interrupted");
@@ -460,16 +495,14 @@ void listenForWake() {
   micToGemini = false;
   micMuted = false;
   xStreamBufferReset(srBuf);
-  if (srOk) sr_set_mode(SR_MODE_COMMAND);
   bodyRelax();
   setLed(0, 0, 0);
-  Serial.println("[wake] listening for \"Hey Billy\"");
+  Serial.println(srOk ? "[wake] listening for \"Hi E-S-P\"" : "[wake] wake word off - use the button");
 }
 
 void startChat() {
   Serial.println("[chat] start");
   mode = CHATTING;
-  if (srOk) sr_set_mode(SR_MODE_OFF);
   xStreamBufferReset(micBuf);
   flushPlayback();
   micMuted = false;
@@ -528,11 +561,26 @@ void startWakeRecognizer() {
   }
 
   printHeap("before wake recognizer");
-  const char *fmt = MIC_CHANNEL == 0 ? "MN" : "NM";
-  srOk = sr_start(srFill, NULL, SR_CHANNELS_STEREO, SR_MODE_COMMAND, fmt,
-                  wakeCommands, sizeof(wakeCommands) / sizeof(wakeCommands[0]), srEvent, NULL) == ESP_OK;
+  srmodel_list_t *models = esp_srmodel_init("model");
+  if (!models || models->num == 0) {
+    Serial.println("!! No speech models found - check Partition Scheme = ESP SR 16M. Button still works.");
+  } else {
+    afe_config_t *cfg = afe_config_init(MIC_CHANNEL == 0 ? "MN" : "NM", models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    if (cfg) {
+      Serial.printf("[wake] model: %s\n", cfg->wakenet_model_name ? cfg->wakenet_model_name : "(none)");
+      afe = esp_afe_handle_from_config(cfg);
+      afeData = afe ? afe->create_from_config(cfg) : nullptr;
+      afe_config_free(cfg);
+    }
+    srOk = afe && afeData;
+    if (srOk) {
+      xTaskCreatePinnedToCore(wakeFeedTask, "wakeFeed", 4096, NULL, 5, NULL, 0);
+      xTaskCreatePinnedToCore(wakeDetectTask, "wakeDetect", 6144, NULL, 5, NULL, 1);
+    } else {
+      Serial.println("!! Wake word failed to start. Button still works.");
+    }
+  }
   printHeap("after wake recognizer");
-  if (!srOk) Serial.println("!! Wake phrase unavailable - check Partition Scheme = ESP SR 16M. Button still works.");
 
   prefs.begin("billy", false);
   prefs.putBool("srtry", false);
@@ -654,7 +702,6 @@ void loop() {
   if (mode == WAKE_LISTEN) {
     static uint32_t lastUpdateCheck = millis();
     if (now - lastUpdateCheck > UPDATE_EVERY_MS) { lastUpdateCheck = now; checkForUpdate(); }
-    if (srTimedOut) { srTimedOut = false; if (srOk) sr_set_mode(SR_MODE_COMMAND); }   // keep listening
     if (wakeHeard || click) { wakeHeard = false; startChat(); }
     delay(5);
     return;

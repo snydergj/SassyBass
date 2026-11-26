@@ -79,11 +79,10 @@
 #define MOUTH_DUTY     230   // 0-255
 #define BODY_DUTY      200   // 0-255
 
-// ---------- Wake phrase (offline, ESP-SR command recognizer) ----------
+// ---------- Wake word ----------
+// Uses Espressif's built-in always-on WakeNet model "Hi ESP" (say "Hi E-S-P").
 // Needs Tools > Partition Scheme > "ESP SR 16M (3MB APP/6MB SPIFFS/3.9MB MODEL)".
-// Plain English text; add a few variants so it catches how people actually say it.
-// Upper-case words only: no digits or punctuation.
-#define WAKE_PHRASES   { {0, "HEY BILLY"}, {0, "HI BILLY"}, {0, "HELLO BILLY"} }
+// A custom "Hey Billy" needs a custom-trained WakeNet model.
 
 // ---------- Behaviour ----------
 #define SPEAKER_VOLUME        80     // 0-100 starting volume (voice/button changes are remembered)

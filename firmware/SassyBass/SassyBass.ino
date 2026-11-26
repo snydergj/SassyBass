@@ -212,8 +212,13 @@ void audioTask(void *) {
     size_t avail = xStreamBufferBytesAvailable(playBuf);
     if (!flowing && (avail >= (size_t)API_OUT_RATE * 2 * PREBUFFER_MS / 1000 || (replyComplete && avail > 0)))
       flowing = true;
-    size_t got = flowing ? xStreamBufferReceive(playBuf, (uint8_t *)(in + carry), (480 - carry) * 2, 0) / 2 : 0;
-    if (flowing && avail == 0) { flowing = false; if (!replyComplete) audioGaps++; }
+    size_t need = (480 - carry) * 2;
+    // Never play a partial block mid-reply: padding it with silence makes
+    // tiny clicks/stutters. Treat "not enough for a full block" as a gap and
+    // re-buffer instead (the end of a reply may be partial).
+    if (flowing && avail < need && !replyComplete) { flowing = false; audioGaps++; }
+    if (flowing && avail == 0) flowing = false;
+    size_t got = flowing ? xStreamBufferReceive(playBuf, (uint8_t *)(in + carry), need, 0) / 2 : 0;
     int total = carry + got, groups = total / 3, outN = 0;
     long envSum = 0;
     for (int g = 0; g < groups; g++) {         // 3 in -> 2 out (linear interpolation)

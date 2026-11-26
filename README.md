@@ -22,7 +22,7 @@ Go to **Settings → Pages → Build and deployment → Deploy from a branch →
 ## Releasing an update
 
 1. Edit the firmware and push to `main`. GitHub Actions compiles it to check for errors.
-2. Create a version tag: **Releases → Draft a new release → tag `v1.0.1` → Publish**, or `git tag v1.0.1 && git push origin v1.0.1`.
+2. Go to **Actions → Build firmware → Run workflow**, enter a version like `1.0.1`, and click Run. Pushing a `v1.0.1` tag does the same thing.
 3. Actions builds the binaries, copies them into `docs/firmware/`, and bumps `docs/version.json` and `docs/manifest.json`.
 4. Every fish updates the next time it starts. The web installer also serves the new version.
 

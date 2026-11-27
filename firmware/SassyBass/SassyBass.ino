@@ -49,6 +49,7 @@ volatile bool micToGemini = false;      // micTask routes audio to Gemini (else 
 volatile bool micMuted = false;         // true while Billy is talking (stops him hearing himself)
 volatile bool speechPlaying = false;    // set by the audio task while sound is coming out
 volatile bool replyComplete = true;     // Gemini finished sending the current reply's audio
+volatile bool waitWholeReply = false;  // serial "buffer=full": play only after the whole reply arrived (Wi-Fi quiet)
 volatile uint32_t audioGaps = 0;        // playback ran dry mid-reply (diagnostics)
 // Per-reply audio diagnostics, printed when Billy finishes talking
 volatile uint32_t stChunks = 0, stBytes = 0, stBadChunks = 0, stOddChunks = 0;
@@ -279,7 +280,8 @@ void audioTask(void *) {
     // gap) only once PREBUFFER_MS is queued, or the reply is complete.
     static bool flowing = false;
     size_t avail = xStreamBufferBytesAvailable(playBuf);
-    if (!flowing && (avail >= (size_t)API_OUT_RATE * 2 * PREBUFFER_MS / 1000 || (replyComplete && avail > 0)))
+    bool enough = waitWholeReply ? replyComplete : avail >= (size_t)API_OUT_RATE * 2 * PREBUFFER_MS / 1000;
+    if (!flowing && avail > 0 && (enough || replyComplete))
       flowing = true;
     const size_t need = sizeof(raw);
     if (flowing && avail < need && !replyComplete) { flowing = false; audioGaps++; }   // re-buffer, never pad mid-reply
@@ -797,6 +799,9 @@ void serialCommands() {
     motorsOn = line.endsWith("on");
     drive(MOUTH_IN1, MOUTH_IN2, 0); drive(BODY_IN1, BODY_IN2, 0);
     Serial.printf("Motors %s (until restart)\n", motorsOn ? "ON" : "OFF");
+  } else if (line == "buffer=full" || line == "buffer=stream") {
+    waitWholeReply = line.endsWith("full");
+    Serial.printf("Playback: %s (until restart)\n", waitWholeReply ? "wait for the whole reply, then play" : "stream as it arrives");
   } else if (line == "replay") {
     // Play the last captured Gemini reply again through the speaker
     if (!capIn || !capInLen) { Serial.println("Nothing captured yet."); return; }
@@ -835,7 +840,7 @@ void serialCommands() {
   } else if (line == "restart") {
     ESP.restart();
   } else if (line.length()) {
-    Serial.println("Commands: key=..., wifi=SSID,password, motors=off|on, tone, tone loud, replay, wake=reset, restart");
+    Serial.println("Commands: key=..., wifi=SSID,password, motors=off|on, tone, tone loud, replay, buffer=full|stream, wake=reset, restart");
   }
 }
 

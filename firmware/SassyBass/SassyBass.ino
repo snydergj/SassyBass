@@ -62,6 +62,8 @@ const size_t CAP_IN_MAX = API_OUT_RATE * 20, CAP_OUT_MAX = I2S_RATE * 20;   // 2
 int16_t *capIn = nullptr, *capOut = nullptr;
 volatile size_t capInLen = 0, capOutLen = 0;
 void startStationWeb();
+void drainStream(StreamBufferHandle_t sb);
+volatile bool flushRequested = false;   // set by flushPlayback(); serviced by the speaker task
 volatile bool wakeHeard = false;        // set by the recognizer callback
 bool sessionReady = false;
 bool turnDone = false;
@@ -229,7 +231,7 @@ bool wakeStart() {
   afeData = afe ? afe->create_from_config(cfg) : nullptr;
   afe_config_free(cfg);
   if (!afeData) return false;
-  xStreamBufferReset(srBuf);
+  drainStream(srBuf);
   wakeRunning = true;
   wakeTasksAlive = 2;
   xTaskCreatePinnedToCore(wakeFeedTask, "wakeFeed", 4096, NULL, 3, NULL, 0);
@@ -280,6 +282,7 @@ void audioTask(void *) {
     // Jitter buffer: network audio arrives in bursts. Start (or resume after a
     // gap) only once PREBUFFER_MS is queued, or the reply is complete.
     static bool flowing = false;
+    if (flushRequested) { drainStream(playBuf); flowing = false; flushRequested = false; }
     size_t avail = xStreamBufferBytesAvailable(playBuf);
     bool enough = waitWholeReply ? replyComplete : avail >= (size_t)API_OUT_RATE * 2 * PREBUFFER_MS / 1000;
     if (!flowing && avail > 0 && (enough || replyComplete))
@@ -342,7 +345,17 @@ void audioTask(void *) {
 }
 
 
-void flushPlayback() { xStreamBufferReset(playBuf); }
+// Empty a stream buffer by reading it out. Do NOT use xStreamBufferReset():
+// in ESP-IDF it re-fills the whole buffer storage (hundreds of KB of PSRAM)
+// inside a critical section with interrupts off. Called every loop while
+// Billy talked, that starved the speaker's DMA and caused the stutter/echo.
+void drainStream(StreamBufferHandle_t sb) {
+  static uint8_t scratch[1024];
+  while (xStreamBufferReceive(sb, scratch, sizeof(scratch), 0) > 0) {}
+}
+
+// The speaker task is playBuf's only reader, so it does the flush itself.
+void flushPlayback() { flushRequested = true; }
 
 // ---------------------------------------------------------------- JSON helpers
 String jsonEscape(const char *s) {
@@ -631,7 +644,7 @@ void listenForWake() {
   mode = WAKE_LISTEN;
   micToGemini = false;
   micMuted = false;
-  xStreamBufferReset(srBuf);
+  drainStream(srBuf);
   bodyRelax();
   setLed(0, 0, 0);
   bool on = srOk && wakeStart();
@@ -641,7 +654,7 @@ void listenForWake() {
 void startChat() {
   Serial.println("[chat] start");
   mode = CHATTING;
-  xStreamBufferReset(micBuf);
+  drainStream(micBuf);
   flushPlayback();
   micMuted = false;
   micToGemini = true;                 // mic audio buffers while we connect
@@ -927,7 +940,7 @@ void loop() {
     lastBillyAudio = now;
     if (!wasTalking) { headOut(); setLed(0, 40, 0); }  // head out while he talks
   } else if (now - lastBillyAudio > MIC_HOLDOFF_MS) {
-    if (micMuted) { micMuted = false; xStreamBufferReset(micBuf); bodyRelax(); setLed(0, 0, 60); }
+    if (micMuted) { micMuted = false; drainStream(micBuf); bodyRelax(); setLed(0, 0, 60); }
   }
   if (wasTalking && !billyTalking) {
     Serial.printf("[audio] reply: %u chunks, %u ms audio, gaps %u, bad %u, odd %u, late writes %u (max %u ms), min buffer %u ms\n",
@@ -940,7 +953,7 @@ void loop() {
   wasTalking = billyTalking;
 
   if (sessionReady && !micMuted) pumpMicAudio();
-  else if (micMuted) xStreamBufferReset(micBuf);
+
 
   // Ending: wait for Billy's goodbye to finish playing
   if (endRequested) {

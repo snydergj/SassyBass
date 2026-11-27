@@ -580,6 +580,11 @@ void onWsMessage(char *msg, size_t len) {
     return;
   }
 
+  // Safety filters: Google doesn't send a clear error - a blocked reply just stops,
+  // sometimes with a finish/block reason tucked in. Log any we see.
+  if (strstr(msg, "SAFETY") || strstr(msg, "blockReason") || strstr(msg, "finishReason") || strstr(msg, "PROHIBITED"))
+    Log.printf("[ai] filter/finish note: %.300s\n", msg);
+
   // Read the text fields first: decoding audio in place scrambles the text after it.
   bool interrupted = findKey(msg, "interrupted");
   bool complete = findKey(msg, "turnComplete");

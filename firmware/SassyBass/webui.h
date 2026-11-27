@@ -54,11 +54,12 @@ pre{background:#071510;padding:10px;border-radius:8px;white-space:pre-wrap;font-
   <div class="hint">Changes apply at Billy's next chat (or right away if he's chatting).</div></div>
  <div class="card"><h2>Identity</h2>
   <label>Name</label><input id="pname">
+  <label>Type</label><select id="ptype"><option value="fish">Fish character (thinks he's a talking fish)</option><option value="assistant">Regular assistant (normal chatbot)</option></select>
   <label>Voice</label><select id="pvoice"></select>
   <div class="hint">Listen to every voice in Google AI Studio's Stream page.</div>
   <label>Voice, accent &amp; style</label><textarea id="pinstr" placeholder="e.g. Thick Cajun accent, slow and sly. Loves crawfish."></textarea></div>
  <div class="card"><h2>Personality</h2><div id="traits"></div></div>
- <div class="card"><h2>Backstory</h2>
+ <div class="card" id="bscard"><h2>Backstory</h2>
   <label>Where he's from</label><input id="b_origin">
   <label>Species</label><input id="b_species">
   <label>How he was caught</label><input id="b_caught">
@@ -96,13 +97,14 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{document.query
 $("#pvoice").innerHTML=VOICES.map(v=>`<option value="${v[0]}">${v[0]} (${v[1]})</option>`).join("");
 $("#traits").innerHTML=TRAITS.map(t=>`<div class="trait"><span>${t[0].toUpperCase()+t.slice(1)}</span><input type="range" min="0" max="100" id="t_${t}" oninput="this.nextElementSibling.textContent=this.value"><b></b></div>`).join("");
 async function load(){S=await api("/api/state");$("#status").innerHTML=`v${S.version}${S.unhinged?" \u{1F92C}":""}<br>${S.state}`;renderSel(cur||S.active);renderFacts();$("#unh").checked=!!S.unhinged;$("#vol").value=S.volume;$("#volv").textContent=S.volume;$("#sysinfo").textContent=`Firmware ${S.version} · ${S.ip} · free RAM ${S.heap} · ${S.personas.length} personas · ${S.facts.length} memories`}
-function renderSel(id){const ps=S.personas;$("#psel").innerHTML=ps.map(p=>`<option value="${p.id}">${p.name}${p.id==S.active?" ★ active":""}</option>`).join("");if(!ps.find(p=>p.id==id))id=S.active;$("#psel").value=id;show(id)}
-function show(id){cur=id;const p=S.personas.find(x=>x.id==id);if(!p)return;$("#pname").value=p.name||"";$("#pvoice").value=p.voice||"Algenib";$("#pinstr").value=p.instructions||"";const t=p.traits||{};TRAITS.forEach(k=>{const e=$("#t_"+k);e.value=t[k]??50;e.nextElementSibling.textContent=e.value});const b=p.backstory||{};["origin","species","caught","purpose","awakening"].forEach(k=>$("#b_"+k).value=b[k]||"")}
-function collect(){const t={};TRAITS.forEach(k=>t[k]=+$("#t_"+k).value);const b={};["origin","species","caught","purpose","awakening"].forEach(k=>b[k]=$("#b_"+k).value);return{id:cur,name:$("#pname").value.trim()||"Billy",voice:$("#pvoice").value,instructions:$("#pinstr").value,traits:t,backstory:b}}
+function renderSel(id){const ps=S.personas;const opt=p=>`<option value="${p.id}">${p.name}${p.id==S.active?" ★ active":""}</option>`;$("#psel").innerHTML=`<optgroup label="Fish characters">${ps.filter(p=>p.type!="assistant").map(opt).join("")}</optgroup><optgroup label="Regular assistants">${ps.filter(p=>p.type=="assistant").map(opt).join("")}</optgroup>`;if(!ps.find(p=>p.id==id))id=S.active;$("#psel").value=id;show(id)}
+function show(id){cur=id;const p=S.personas.find(x=>x.id==id);if(!p)return;$("#pname").value=p.name||"";$("#ptype").value=p.type||"fish";$("#bscard").style.display=$("#ptype").value=="assistant"?"none":"";$("#pvoice").value=p.voice||"Algenib";$("#pinstr").value=p.instructions||"";const t=p.traits||{};TRAITS.forEach(k=>{const e=$("#t_"+k);e.value=t[k]??50;e.nextElementSibling.textContent=e.value});const b=p.backstory||{};["origin","species","caught","purpose","awakening"].forEach(k=>$("#b_"+k).value=b[k]||"")}
+function collect(){const t={};TRAITS.forEach(k=>t[k]=+$("#t_"+k).value);const b={};["origin","species","caught","purpose","awakening"].forEach(k=>b[k]=$("#b_"+k).value);return{id:cur,type:$("#ptype").value,name:$("#pname").value.trim()||"Billy",voice:$("#pvoice").value,instructions:$("#pinstr").value,traits:t,backstory:b}}
 $("#psel").onchange=e=>show(e.target.value);
+$("#ptype").onchange=e=>$("#bscard").style.display=e.target.value=="assistant"?"none":"";
 $("#psave").onclick=async()=>{const r=await api("/api/persona",collect());cur=r.id;await load();toast("Saved")};
 $("#mkactive").onclick=async()=>{await api("/api/persona",collect());await api("/api/active",{id:cur});await load();toast("Billy will use this persona")};
-$("#pnew").onclick=async()=>{const r=await api("/api/persona",{id:"",name:"New Fish",voice:"Puck",instructions:"",traits:Object.fromEntries(TRAITS.map(t=>[t,50])),backstory:{}});cur=r.id;await load();toast("Created")};
+$("#pnew").onclick=async()=>{const r=await api("/api/persona",{id:"",type:"fish",name:"New Fish",voice:"Puck",instructions:"",traits:Object.fromEntries(TRAITS.map(t=>[t,50])),backstory:{}});cur=r.id;await load();toast("Created")};
 $("#pdup").onclick=async()=>{const p=collect();p.id="";p.name+=" copy";const r=await api("/api/persona",p);cur=r.id;await load();toast("Duplicated")};
 $("#pdel").onclick=async()=>{if(S.personas.length<2)return toast("Keep at least one");if(!confirm("Delete this persona?"))return;await api("/api/persona/delete",{id:cur});cur=null;await load();toast("Deleted")};
 function renderFacts(){$("#facts").innerHTML=S.facts.length?S.facts.map((f,i)=>`<div class="fact"><div>${f.replace(/</g,"&lt;")}</div><button class="d" onclick="delFact(${i})">&#x2715;</button></div>`).join(""):'<div class="hint" style="padding:10px 0">Nothing yet.</div>'}
@@ -172,6 +174,7 @@ void registerWebApi() {
     p.clear();
     p["id"] = id;
     p["name"] = (in["name"] | "Billy");
+    p["type"] = String(in["type"] | "fish") == "assistant" ? "assistant" : "fish";
     p["voice"] = (in["voice"] | "Algenib");
     p["instructions"] = (in["instructions"] | "");
     JsonObject t = p["traits"].to<JsonObject>();

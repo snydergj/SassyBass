@@ -73,6 +73,42 @@ static const char PRESETS_JSON[] PROGMEM = R"JSON({
   "instructions":"Be a cranky, grumbling old-timer who complains about everything (kids these days, the weather, being a fish) but is secretly fond of the user."}
 ]})JSON";
 
+// Regular (non-fish) assistants, added on top of the fish presets.
+// PRESETS_VERSION lets existing fish pick these up after an update.
+static const int PRESETS_VERSION = 2;
+static const char ASSISTANT_PRESETS_JSON[] PROGMEM = R"JSON([
+ {"id":"ava","name":"Ava","type":"assistant","voice":"Sulafat",
+  "traits":{"humor":55,"sarcasm":15,"honesty":85,"confidence":70,"warmth":90,"curiosity":65,"verbosity":45,"formality":30},
+  "backstory":{},
+  "instructions":"A warm, friendly everyday assistant. Helpful and encouraging, easy to talk to, like a good friend who knows a lot."},
+ {"id":"maya","name":"Maya","type":"assistant","voice":"Laomedeia",
+  "traits":{"humor":75,"sarcasm":35,"honesty":80,"confidence":75,"warmth":80,"curiosity":90,"verbosity":50,"formality":10},
+  "backstory":{},
+  "instructions":"An upbeat, playful conversationalist who loves tangents, trivia and asking follow-up questions. Casual and fun."},
+ {"id":"iris","name":"Iris","type":"assistant","voice":"Erinome",
+  "traits":{"humor":30,"sarcasm":10,"honesty":95,"confidence":85,"warmth":60,"curiosity":40,"verbosity":25,"formality":60},
+  "backstory":{},
+  "instructions":"A calm, precise assistant. Gives clear, accurate, to-the-point answers without fluff. Good for facts, how-tos and quick help."},
+ {"id":"max","name":"Max","type":"assistant","voice":"Achird",
+  "traits":{"humor":85,"sarcasm":60,"honesty":85,"confidence":80,"warmth":75,"curiosity":55,"verbosity":40,"formality":5},
+  "backstory":{},
+  "instructions":"A witty, laid-back buddy. Jokes around, gives honest opinions, and keeps things relaxed."}
+])JSON";
+
+void addMissingPresets() {
+  int have = personasDoc["presetsVersion"] | 1;
+  if (have >= PRESETS_VERSION) return;
+  JsonDocument extra;
+  deserializeJson(extra, FPSTR(ASSISTANT_PRESETS_JSON));
+  JsonArray arr = personasDoc["personas"];
+  for (JsonObject p : extra.as<JsonArray>()) {
+    bool exists = false;
+    for (JsonObject o : arr) if (p["id"] == o["id"]) exists = true;
+    if (!exists) arr.add(p);
+  }
+  personasDoc["presetsVersion"] = PRESETS_VERSION;
+}
+
 // ---------------------------------------------------------------- storage
 bool readJsonFile(const char *path, JsonDocument &doc) {
   File f = LittleFS.open(path, "r");
@@ -94,6 +130,7 @@ bool writeJsonFile(const char *path, JsonDocument &doc) {
 
 void resetPersonasToPresets() {
   deserializeJson(personasDoc, FPSTR(PRESETS_JSON));
+  addMissingPresets();
   writeJsonFile("/personas.json", personasDoc);
 }
 
@@ -106,6 +143,11 @@ void storageBegin() {
       personasDoc["personas"].size() == 0) {
     Log.println("[persona] creating preset personas");
     resetPersonasToPresets();
+  }
+  if ((personasDoc["presetsVersion"] | 1) < PRESETS_VERSION) {
+    addMissingPresets();
+    savePersonas();
+    Log.println("[persona] added new preset assistants");
   }
   if (!readJsonFile("/memory.json", memoryDoc) || !memoryDoc["facts"].is<JsonArray>()) {
     memoryDoc.clear();
@@ -152,9 +194,17 @@ String buildInstructions() {
   String name = p["name"] | "Billy";
   String s;
   s.reserve(3000);
-  s += "You are " + name + ", a talking Big Mouth Billy Bass animatronic fish mounted on a wooden wall plaque. "
-       "You can talk, turn your head and flap your tail. Always stay in character. Never say you are an AI or a language model; "
-       "you are a fish. Respond in the language you are spoken to.\n\n";
+  bool fish = String(p["type"] | "fish") != "assistant";
+  if (fish) {
+    s += "You are " + name + ", a talking Big Mouth Billy Bass animatronic fish mounted on a wooden wall plaque. "
+         "You can talk, turn your head and flap your tail. Always stay in character. Never say you are an AI or a language model; "
+         "you are a fish. Respond in the language you are spoken to.\n\n";
+  } else {
+    s += "You are " + name + ", a friendly, helpful voice assistant having a spoken conversation. "
+         "You are NOT a fish and have no fish backstory; you just happen to be running inside a novelty Billy Bass speaker, "
+         "so only mention that if asked. Be genuinely helpful: answer questions, chat, explain things, brainstorm. "
+         "Respond in the language you are spoken to. Your replies are spoken aloud, so never use lists, markdown or emoji.\n\n";
+  }
 
   s += "Personality (0-100, higher is stronger):\n";
   auto trait = [&](const char *key, const char *desc) {
@@ -174,7 +224,10 @@ String buildInstructions() {
        verb <= 70 ? "two or three sentences." : "a few sentences; you like to ramble a bit.";
   s += " Only go longer if asked to tell a story or explain something.\n\n";
 
-  s += "Backstory (bring it up naturally when relevant):\n";
+  bool anyBackstory = false;
+  for (const char *k : {"origin", "species", "caught", "purpose", "awakening"})
+    if (b[k].as<String>().length()) anyBackstory = true;
+  if (anyBackstory) s += "Backstory (bring it up naturally when relevant):\n";
   if (b["origin"].as<String>().length())    s += "- Originally from " + b["origin"].as<String>() + ".\n";
   if (b["species"].as<String>().length())   s += "- Species: " + b["species"].as<String>() + ".\n";
   if (b["caught"].as<String>().length())    s += "- Caught " + b["caught"].as<String>() + ".\n";

@@ -49,6 +49,7 @@ volatile bool micToGemini = false;      // micTask routes audio to Gemini (else 
 volatile bool micMuted = false;         // true while Billy is talking (stops him hearing himself)
 volatile bool speechPlaying = false;    // set by the audio task while sound is coming out
 volatile bool replyComplete = true;     // Gemini finished sending the current reply's audio
+volatile int digitalGainPct = 100;     // serial "gain=NN": scale samples before the codec (headroom test)
 volatile bool waitWholeReply = false;  // serial "buffer=full": play only after the whole reply arrived (Wi-Fi quiet)
 volatile uint32_t audioGaps = 0;        // playback ran dry mid-reply (diagnostics)
 // Per-reply audio diagnostics, printed when Billy finishes talking
@@ -296,7 +297,7 @@ void audioTask(void *) {
       float acc = 0;
       for (int k = (p & 1); k < TAPS; k += 2)  // only even positions hold real samples
         acc += h[k] * xin[(p - k) >> 1];
-      int v = (int)acc;
+      int v = (int)(acc * digitalGainPct / 100);
       if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
       out[m * 2] = out[m * 2 + 1] = (int16_t)v;
       envSum += abs(v);
@@ -799,6 +800,9 @@ void serialCommands() {
     motorsOn = line.endsWith("on");
     drive(MOUTH_IN1, MOUTH_IN2, 0); drive(BODY_IN1, BODY_IN2, 0);
     Serial.printf("Motors %s (until restart)\n", motorsOn ? "ON" : "OFF");
+  } else if (line.startsWith("gain=")) {
+    digitalGainPct = constrain(line.substring(5).toInt(), 5, 200);
+    Serial.printf("Digital gain %d%% (until restart)\n", digitalGainPct);
   } else if (line == "buffer=full" || line == "buffer=stream") {
     waitWholeReply = line.endsWith("full");
     Serial.printf("Playback: %s (until restart)\n", waitWholeReply ? "wait for the whole reply, then play" : "stream as it arrives");
@@ -840,7 +844,7 @@ void serialCommands() {
   } else if (line == "restart") {
     ESP.restart();
   } else if (line.length()) {
-    Serial.println("Commands: key=..., wifi=SSID,password, motors=off|on, tone, tone loud, replay, buffer=full|stream, wake=reset, restart");
+    Serial.println("Commands: key=..., wifi=SSID,password, motors=off|on, tone, tone loud, replay, gain=NN, buffer=full|stream, wake=reset, restart");
   }
 }
 

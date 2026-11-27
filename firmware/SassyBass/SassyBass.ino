@@ -78,6 +78,13 @@ volatile bool wakeRunning = false;      // wake engine running (only while waiti
 volatile int wakeTasksAlive = 0;
 uint32_t endRequestedAt = 0, lastHeard = 0, lastBillyAudio = 0;
 String heardThisTurn;
+// Stall watchdog: if Gemini goes quiet in the middle of a reply (dropped
+// connection, server hiccup), reconnect instead of waiting forever with the mic muted.
+uint32_t lastServerMsg = 0;
+bool awaitingAudio = false;             // Billy's text arrived but his audio hasn't yet
+String resumeHandle;                    // Gemini session-resumption handle (keeps the conversation on reconnect)
+bool resuming = false;
+uint8_t stallRecoveries = 0;
 
 const esp_afe_sr_iface_t *afe = nullptr;   // wake-word front end (WakeNet only, no MultiNet)
 esp_afe_sr_data_t *afeData = nullptr;
@@ -531,6 +538,7 @@ void sendSetup() {
              "\"systemInstruction\":{\"parts\":[{\"text\":\"" + jsonEscape(buildInstructions().c_str()) + "\"}]},"
              "\"inputAudioTranscription\":{},"
              "\"outputAudioTranscription\":{},"
+             "\"sessionResumption\":{" + (resuming && resumeHandle.length() ? "\"handle\":\"" + jsonEscape(resumeHandle.c_str()) + "\"" : String()) + "},"
              + tools +
              "}}";
   Log.printf("[ai] persona: %s (voice %s)\n", activeName().c_str(), activeVoice().c_str());
@@ -544,11 +552,23 @@ bool saidGoodbye(String t) {
 }
 
 void onWsMessage(char *msg, size_t len) {
+  lastServerMsg = millis();
   if (findKey(msg, "setupComplete")) {
     sessionReady = true;
-    Log.println("[ai] session ready");
-    // Billy speaks first so you know he's awake (no need to say "Hey Billy").
-    ws.sendText("{\"realtimeInput\":{\"text\":\"(Someone just woke you up. Greet them in one short, sassy sentence.)\"}}");
+    Log.println(resuming ? "[ai] session ready (reconnected)" : "[ai] session ready");
+    if (resuming && resumeHandle.length())
+      ws.sendText("{\"realtimeInput\":{\"text\":\"(Your connection glitched and your last answer got cut off. Say a very short 'where was I' line in character, then give that answer again, briefly.)\"}}");
+    else if (resuming)
+      ws.sendText("{\"realtimeInput\":{\"text\":\"(Your connection dropped and you lost track of the conversation. In one short sentence, in character, admit you zoned out and ask them to say that again.)\"}}");
+    else  // Billy speaks first so you know he's awake (no need to say "Hey Billy").
+      ws.sendText("{\"realtimeInput\":{\"text\":\"(Someone just woke you up. Greet them in one short, sassy sentence.)\"}}");
+    resuming = false;
+    return;
+  }
+  if (const char *ru = findKey(msg, "sessionResumptionUpdate")) {
+    size_t hl; char *h = findStr(ru, "newHandle", hl);
+    const char *r = findKey(ru, "resumable");
+    if (h && hl && r && strncmp(r, "true", 4) == 0) resumeHandle = String(h, hl);
     return;
   }
   if (findKey(msg, "toolCall")) { handleToolCall(msg); return; }
@@ -569,6 +589,7 @@ void onWsMessage(char *msg, size_t len) {
     if (t) {
       String piece(t, tl);
       heardThisTurn += piece;
+      awaitingAudio = false;
       lastHeard = millis();
       Log.print("[you] "); Log.println(piece);
       if (saidGoodbye(heardThisTurn)) requestEnd();      // backup in case the tool isn't called
@@ -578,7 +599,10 @@ void onWsMessage(char *msg, size_t len) {
   if (ot) {
     size_t tl; char *t = findStr(ot, "text", tl);
     bool placeholder = t && (strncmp(t, "\\u003c!--", 10) == 0 || strncmp(t, "<!--", 4) == 0);   // Gemini's "empty response" marker
-    if (t && !placeholder) { Log.print("[billy] "); Log.write((const uint8_t *)t, tl); Log.println(); }
+    if (t && !placeholder) {
+      Log.print("[billy] "); Log.write((const uint8_t *)t, tl); Log.println();
+      if (replyComplete) awaitingAudio = true;          // text before audio: watch for the audio
+    }
   }
   if (interrupted) flushPlayback();
 
@@ -593,6 +617,7 @@ void onWsMessage(char *msg, size_t len) {
         Log.printf("[audio] base64 decode failed (%d), %u chars, starts: %.24s\n", rc, (unsigned)dl, d);
       } else if (olen) {
         micMuted = true;                                // Billy is about to talk
+        awaitingAudio = false;
         lastBillyAudio = millis();
         if (replyComplete) { capInLen = 0; capOutLen = 0; }   // first audio of a new reply
         replyComplete = false;
@@ -616,12 +641,14 @@ void onWsMessage(char *msg, size_t len) {
       p = d + dl + 1;
     }
   }
-  if (interrupted) replyComplete = true;
-  if (complete) { turnDone = true; replyComplete = true; heardThisTurn = ""; lastHeard = millis(); }
+  if (interrupted) { replyComplete = true; awaitingAudio = false; }
+  if (findKey(msg, "generationComplete")) awaitingAudio = false;
+  if (complete) { turnDone = true; replyComplete = true; awaitingAudio = false; stallRecoveries = 0; heardThisTurn = ""; lastHeard = millis(); }
 }
 
 bool connectGemini() {
   sessionReady = false;
+  lastServerMsg = millis();
   String err;
   String path = String(GEMINI_PATH) + "?key=" + geminiKey;
   Log.println("[ai] connecting...");
@@ -672,6 +699,7 @@ void startChat() {
   endRequested = false;
   turnDone = false;
   heardThisTurn = "";
+  resumeHandle = ""; resuming = false; awaitingAudio = false; stallRecoveries = 0;
   lastHeard = millis();
   setLed(0, 0, 60);
   headOut(); delay(400); bodyRelax();  // "I'm listening"
@@ -964,7 +992,35 @@ void loop() {
     lastHeard = millis();
     if (!connectGemini()) { endChat(); return; }
   }
-  if (!ws.connected()) { Log.println("[ai] connection closed"); endChat(); return; }
+  if (!ws.connected()) {
+    Log.println("[ai] connection closed");
+    if (resuming && resumeHandle.length() && !endRequested) {    // resume refused: start a fresh session
+      Log.println("[ai] couldn't resume - starting a fresh session");
+      resumeHandle = "";
+      if (connectGemini()) return;
+    }
+    endChat(); return;
+  }
+
+  // Stall watchdog: waiting on Gemini (setup, or a reply whose audio stopped
+  // coming) with nothing received for REPLY_STALL_MS -> reconnect and carry on.
+  bool waitingOnGemini = !sessionReady || ((!replyComplete || awaitingAudio) && !speechPlaying);
+  if (waitingOnGemini && now - lastServerMsg > REPLY_STALL_MS) {
+    Log.printf("[ai] stalled: nothing from Gemini for %u ms (%s, %u ms of audio queued, internal free %u)\n",
+               (unsigned)(now - lastServerMsg),
+               !sessionReady ? "waiting for setup" : awaitingAudio ? "text arrived, no audio" : "reply cut off",
+               (unsigned)(xStreamBufferBytesAvailable(playBuf) * 1000 / (API_OUT_RATE * 2)),
+               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    flushPlayback();
+    replyComplete = true; awaitingAudio = false; micMuted = false;
+    ws.close(); sessionReady = false;
+    if (++stallRecoveries > 2 || endRequested) { Log.println("[ai] giving up on this chat"); endChat(); return; }
+    resuming = true;
+    lastHeard = millis();
+    setLed(0, 0, 60);
+    if (!connectGemini()) endChat();
+    return;
+  }
 
   // Billy's turn lasts from his first audio until Gemini says the reply is
   // complete AND the speaker has drained. The mic stays muted the whole time,

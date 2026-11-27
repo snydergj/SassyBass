@@ -92,6 +92,7 @@
 #define MOUTH_MAX_OPEN_MS     350    // force a "flap" if held open longer
 #define PREBUFFER_MS          400    // queue this much reply audio before playing (smooths network hiccups)
 #define MIC_HOLDOFF_MS        400    // keep the mic muted this long after Billy stops talking (no self-echo)
+#define REPLY_STALL_MS 8000      // Gemini silent this long mid-reply -> reconnect
 #define CONVO_IDLE_MS       45000    // end the chat if nobody says anything for this long
 #define END_GRACE_MS         8000    // after "goodbye", wait at most this long for Billy's farewell
 #define SETUP_AP_SSID   "BillyBass-Setup"

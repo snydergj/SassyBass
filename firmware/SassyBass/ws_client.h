@@ -7,6 +7,7 @@
 #include <NetworkClientSecure.h>
 #include "mbedtls/base64.h"
 #include "esp_random.h"
+#include "logtee.h"
 
 class WsClient {
 public:
@@ -147,7 +148,7 @@ private:
       uint8_t p[126] = {0};
       if (len && len <= 125 && readExact(p, len)) {
         int code = len >= 2 ? (p[0] << 8) | p[1] : 0;
-        Serial.printf("[ws] server closed (%d): %.*s\n", code, (int)(len > 2 ? len - 2 : 0), (char *)p + 2);
+        Log.printf("[ws] server closed (%d): %.*s\n", code, (int)(len > 2 ? len - 2 : 0), (char *)p + 2);
       }
       return false;
     }

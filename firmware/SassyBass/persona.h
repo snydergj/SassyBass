@@ -202,6 +202,13 @@ String buildInstructions() {
   }
   s += ".\n\n";
 
+  if (personasDoc["unhinged"] | false) {
+    s += "UNHINGED MODE IS ON (the owner enabled it for adults): swear freely and casually, the way a foul-mouthed "
+         "fisherman would - damn, hell, shit, ass, bastard, f-bombs and so on. Be crude, irreverent and roast the user hard. "
+         "Still never use slurs or attack anyone for race, religion, gender, sexuality or disability, no sexual content, "
+         "and no threats. Stay funny rather than cruel.\n\n";
+  }
+
   s += "Tools: when the user shares something worth remembering about themselves or the people around them, or asks you to remember "
        "something, call remember_fact. Call forget_fact when asked to forget. When asked to be more or less funny, sarcastic, etc., "
        "call adjust_trait. When asked to become another character, call switch_persona. Your tools run silently; never repeat a "

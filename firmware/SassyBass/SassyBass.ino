@@ -30,9 +30,13 @@ extern "C" {
 #include <freertos/stream_buffer.h>
 #include "es8311.h"
 #include "config.h"
+#include <ESPmDNS.h>
+#include "logtee.h"
 #include "portal.h"
 #include "ws_client.h"
 #include "ota.h"
+#include "persona.h"
+#include "webui.h"
 
 // ---------------------------------------------------------------- globals
 I2SClass i2s;
@@ -145,7 +149,7 @@ void setVolume(int v) {
   prefs.begin("billy", false);
   prefs.putInt("vol", volume);
   prefs.end();
-  Serial.printf("[vol] %d\n", volume);
+  Log.printf("[vol] %d\n", volume);
 }
 
 // ---------------------------------------------------------------- motors
@@ -244,7 +248,7 @@ void wakeStop() {
   wakeRunning = false;
   uint32_t t0 = millis();
   while (wakeTasksAlive > 0 && millis() - t0 < 2000) delay(10);
-  if (wakeTasksAlive > 0) { Serial.println("[wake] tasks didn't stop - leaving engine loaded"); return; }
+  if (wakeTasksAlive > 0) { Log.println("[wake] tasks didn't stop - leaving engine loaded"); return; }
   afe->destroy(afeData);
   afeData = nullptr;
 }
@@ -427,11 +431,13 @@ static const char TOOL_DECLS[] PROGMEM = R"JSON(
 void requestEnd() {
   if (!endRequested) {
     endRequested = true; endRequestedAt = millis(); turnDone = false;
-    Serial.println("[chat] goodbye heard");
+    Log.println("[chat] goodbye heard");
   }
 }
 
 String runTool(const String &name, const char *callJson) {
+  String pr = runPersonaTool(name, callJson, findStr, findKey);
+  if (pr.length()) return pr;
   size_t l;
   if (name == "end_conversation") { requestEnd(); return "ok, ending after your goodbye"; }
   if (name == "move_fish") {
@@ -496,7 +502,8 @@ void handleToolCall(char *msg) {
     char *idp = findStr(one.c_str(), "id", l);
     String id = idp ? String(idp, l) : "";
     String result = runTool(name, one.c_str());
-    Serial.printf("[tool] %s -> %s\n", name.c_str(), result.c_str());
+    Log.printf("[tool] %s -> %s\n", name.c_str(), result.c_str());
+    if (name == "switch_persona") turnDone = false;   // wait for the farewell to finish
     if (responses.length()) responses += ",";
     responses += "{";
     if (id.length()) responses += "\"id\":\"" + id + "\",";
@@ -505,7 +512,7 @@ void handleToolCall(char *msg) {
     const char *nextObj = strchr(p, '{');
     if (!nextObj || (close && close < nextObj)) break;
   }
-  if (responses.isEmpty()) { Serial.println("[tool] couldn't parse call"); return; }
+  if (responses.isEmpty()) { Log.println("[tool] couldn't parse call"); return; }
   ws.sendText("{\"toolResponse\":{\"functionResponses\":[" + responses + "]}}");
 }
 
@@ -513,17 +520,20 @@ void handleToolCall(char *msg) {
 // Automatic voice-activity detection is ON: Gemini decides when you've
 // finished talking, so no button is needed.
 void sendSetup() {
+  String tools = FPSTR(TOOL_DECLS);
+  tools.replace("\"functionDeclarations\":[", String("\"functionDeclarations\":[") + FPSTR(PERSONA_TOOL_DECLS));
   String j = "{\"setup\":{"
              "\"model\":\"models/" GEMINI_MODEL "\","
              "\"generationConfig\":{"
                "\"responseModalities\":[\"AUDIO\"],"
-               "\"speechConfig\":{\"voiceConfig\":{\"prebuiltVoiceConfig\":{\"voiceName\":\"" GEMINI_VOICE "\"}}}"
+               "\"speechConfig\":{\"voiceConfig\":{\"prebuiltVoiceConfig\":{\"voiceName\":\"" + jsonEscape(activeVoice().c_str()) + "\"}}}"
              "},"
-             "\"systemInstruction\":{\"parts\":[{\"text\":\"" + jsonEscape(BILLY_PERSONA) + "\"}]},"
+             "\"systemInstruction\":{\"parts\":[{\"text\":\"" + jsonEscape(buildInstructions().c_str()) + "\"}]},"
              "\"inputAudioTranscription\":{},"
              "\"outputAudioTranscription\":{},"
-             + String(FPSTR(TOOL_DECLS)) +
+             + tools +
              "}}";
+  Log.printf("[ai] persona: %s (voice %s)\n", activeName().c_str(), activeVoice().c_str());
   ws.sendText(j);
 }
 
@@ -536,17 +546,17 @@ bool saidGoodbye(String t) {
 void onWsMessage(char *msg, size_t len) {
   if (findKey(msg, "setupComplete")) {
     sessionReady = true;
-    Serial.println("[ai] session ready");
+    Log.println("[ai] session ready");
     // Billy speaks first so you know he's awake (no need to say "Hey Billy").
     ws.sendText("{\"realtimeInput\":{\"text\":\"(Someone just woke you up. Greet them in one short, sassy sentence.)\"}}");
     return;
   }
   if (findKey(msg, "toolCall")) { handleToolCall(msg); return; }
-  if (findKey(msg, "goAway")) { Serial.println("[ai] session time limit - wrapping up"); requestEnd(); return; }
+  if (findKey(msg, "goAway")) { Log.println("[ai] session time limit - wrapping up"); requestEnd(); return; }
   if (!findKey(msg, "serverContent")) {
     if (len > 8 && !findKey(msg, "usageMetadata") && !findKey(msg, "voiceActivity") &&
         !findKey(msg, "sessionResumptionUpdate"))
-      Serial.printf("[ai] other: %.200s\n", msg);    // unexpected - log it
+      Log.printf("[ai] other: %.200s\n", msg);    // unexpected - log it
     return;
   }
 
@@ -560,7 +570,7 @@ void onWsMessage(char *msg, size_t len) {
       String piece(t, tl);
       heardThisTurn += piece;
       lastHeard = millis();
-      Serial.print("[you] "); Serial.println(piece);
+      Log.print("[you] "); Log.println(piece);
       if (saidGoodbye(heardThisTurn)) requestEnd();      // backup in case the tool isn't called
     }
   }
@@ -568,7 +578,7 @@ void onWsMessage(char *msg, size_t len) {
   if (ot) {
     size_t tl; char *t = findStr(ot, "text", tl);
     bool placeholder = t && (strncmp(t, "\\u003c!--", 10) == 0 || strncmp(t, "<!--", 4) == 0);   // Gemini's "empty response" marker
-    if (t && !placeholder) { Serial.print("[billy] "); Serial.write(t, tl); Serial.println(); }
+    if (t && !placeholder) { Log.print("[billy] "); Log.write(t, tl); Log.println(); }
   }
   if (interrupted) flushPlayback();
 
@@ -580,7 +590,7 @@ void onWsMessage(char *msg, size_t len) {
       int rc = mbedtls_base64_decode((unsigned char *)d, dl, &olen, (const unsigned char *)d, dl);
       if (rc != 0) {
         stBadChunks++;
-        Serial.printf("[audio] base64 decode failed (%d), %u chars, starts: %.24s\n", rc, (unsigned)dl, d);
+        Log.printf("[audio] base64 decode failed (%d), %u chars, starts: %.24s\n", rc, (unsigned)dl, d);
       } else if (olen) {
         micMuted = true;                                // Billy is about to talk
         lastBillyAudio = millis();
@@ -614,9 +624,9 @@ bool connectGemini() {
   sessionReady = false;
   String err;
   String path = String(GEMINI_PATH) + "?key=" + geminiKey;
-  Serial.println("[ai] connecting...");
+  Log.println("[ai] connecting...");
   if (!ws.connect(GEMINI_HOST, path, "", err)) {
-    Serial.println("[ai] connect failed: " + err);
+    Log.println("[ai] connect failed: " + err);
     return false;
   }
   sendSetup();
@@ -648,11 +658,11 @@ void listenForWake() {
   bodyRelax();
   setLed(0, 0, 0);
   bool on = srOk && wakeStart();
-  Serial.println(on ? "[wake] listening for \"Hi E-S-P\"" : "[wake] wake word off - use the button");
+  Log.println(on ? "[wake] listening for \"Hi E-S-P\"" : "[wake] wake word off - use the button");
 }
 
 void startChat() {
-  Serial.println("[chat] start");
+  Log.println("[chat] start");
   mode = CHATTING;
   drainStream(micBuf);
   flushPlayback();
@@ -674,7 +684,7 @@ void startChat() {
 }
 
 void endChat() {
-  Serial.println("[chat] end");
+  Log.println("[chat] end");
   micToGemini = false;
   ws.close();
   sessionReady = false;
@@ -690,7 +700,7 @@ bool talkPressed() {
 
 // ---------------------------------------------------------------- wake recognizer
 static void printHeap(const char *tag) {
-  Serial.printf("[mem] %s: internal free %u (largest %u), PSRAM free %u\n", tag,
+  Log.printf("[mem] %s: internal free %u (largest %u), PSRAM free %u\n", tag,
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -708,17 +718,17 @@ void startWakeRecognizer() {
   if (!disabled) prefs.putBool("srtry", true);
   prefs.end();
   if (disabled) {
-    Serial.println("!! Wake phrase crashed on this firmware before - disabled. Button still works.");
+    Log.println("!! Wake phrase crashed on this firmware before - disabled. Button still works.");
     return;
   }
 
   printHeap("before wake recognizer");
   srModels = esp_srmodel_init("model");
   if (!srModels || srModels->num == 0) {
-    Serial.println("!! No speech models found - check Partition Scheme = ESP SR 16M. Button still works.");
+    Log.println("!! No speech models found - check Partition Scheme = ESP SR 16M. Button still works.");
   } else {
     srOk = wakeStart();               // first start inside the crash guard
-    if (!srOk) Serial.println("!! Wake word failed to start. Button still works.");
+    if (!srOk) Log.println("!! Wake word failed to start. Button still works.");
   }
   printHeap("after wake recognizer");
 
@@ -734,10 +744,11 @@ void setup() {
   pinMode(TALK_BTN_PIN, INPUT_PULLUP);
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
   setLed(20, 20, 20);
-  if (!psramFound()) Serial.println("!! PSRAM not enabled - set Tools > PSRAM > OPI PSRAM");
+  if (!psramFound()) Log.println("!! PSRAM not enabled - set Tools > PSRAM > OPI PSRAM");
 
   loadSettings();
-  Serial.printf("\nSassyBass firmware %s\n", FW_VERSION);
+  storageBegin();
+  Log.printf("\nSassyBass firmware %s\n", FW_VERSION);
   prefs.begin("billy", true);
   volume = prefs.getInt("vol", SPEAKER_VOLUME);
   prefs.end();
@@ -747,7 +758,7 @@ void setup() {
 
   i2s.setPins(I2S_BCLK_PIN, I2S_WS_PIN, I2S_DOUT_PIN, I2S_DIN_PIN, I2S_MCLK_PIN);
   if (!i2s.begin(I2S_MODE_STD, I2S_RATE, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO))
-    Serial.println("!! I2S begin failed");
+    Log.println("!! I2S begin failed");
   es8311Init();
   es7210Init();
 
@@ -765,7 +776,7 @@ void setup() {
 
   bool forceSetup = digitalRead(TALK_BTN_PIN) == LOW || exioKeyDown(EXIO_KEY1);
   if (wifiSsid.isEmpty() || geminiKey.isEmpty() || forceSetup) {
-    if (geminiKey.isEmpty()) Serial.println("No Gemini key saved - enter it on the setup page or send key=AIza... over serial");
+    if (geminiKey.isEmpty()) Log.println("No Gemini key saved - enter it on the setup page or send key=AIza... over serial");
     setLed(30, 0, 40); startPortal(); return;
   }
 
@@ -774,15 +785,15 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
-  Serial.print("Wi-Fi connecting");
+  Log.print("Wi-Fi connecting");
   uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) { delay(300); Serial.print('.'); }
-  Serial.println();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) { delay(300); Log.print('.'); }
+  Log.println();
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("Wi-Fi failed - starting setup portal");
+    Log.println("Wi-Fi failed - starting setup portal");
     setLed(30, 0, 40); startPortal(); return;
   }
-  Serial.println("Wi-Fi OK: " + WiFi.localIP().toString());
+  Log.println("Wi-Fi OK: " + WiFi.localIP().toString());
   startStationWeb();
   checkForUpdate();                                    // reboots if a newer release was installed
 
@@ -802,32 +813,32 @@ void serialCommands() {
   if (line.startsWith("key=")) {
     geminiKey = line.substring(4); geminiKey.trim();
     saveSettings();
-    Serial.println("Gemini key saved. Type restart to apply.");
+    Log.println("Gemini key saved. Type restart to apply.");
   } else if (line.startsWith("wifi=")) {
     int comma = line.indexOf(',');
     wifiSsid = line.substring(5, comma < 0 ? line.length() : comma);
     wifiPass = comma < 0 ? "" : line.substring(comma + 1);
     saveSettings();
-    Serial.println("Wi-Fi saved. Type restart to apply.");
+    Log.println("Wi-Fi saved. Type restart to apply.");
   } else if (line == "motors=off" || line == "motors=on") {
     motorsOn = line.endsWith("on");
     drive(MOUTH_IN1, MOUTH_IN2, 0); drive(BODY_IN1, BODY_IN2, 0);
-    Serial.printf("Motors %s (until restart)\n", motorsOn ? "ON" : "OFF");
+    Log.printf("Motors %s (until restart)\n", motorsOn ? "ON" : "OFF");
   } else if (line.startsWith("gain=")) {
     digitalGainPct = constrain(line.substring(5).toInt(), 5, 200);
-    Serial.printf("Digital gain %d%% (until restart)\n", digitalGainPct);
+    Log.printf("Digital gain %d%% (until restart)\n", digitalGainPct);
   } else if (line == "buffer=full" || line == "buffer=stream") {
     waitWholeReply = line.endsWith("full");
-    Serial.printf("Playback: %s (until restart)\n", waitWholeReply ? "wait for the whole reply, then play" : "stream as it arrives");
+    Log.printf("Playback: %s (until restart)\n", waitWholeReply ? "wait for the whole reply, then play" : "stream as it arrives");
   } else if (line == "replay") {
     // Play the last captured Gemini reply again through the speaker
-    if (!capIn || !capInLen) { Serial.println("Nothing captured yet."); return; }
-    Serial.printf("Replaying last reply (%u ms)...\n", (unsigned)(capInLen * 1000 / API_OUT_RATE));
+    if (!capIn || !capInLen) { Log.println("Nothing captured yet."); return; }
+    Log.printf("Replaying last reply (%u ms)...\n", (unsigned)(capInLen * 1000 / API_OUT_RATE));
     size_t n = capInLen, sent = 0;
     while (sent < n * 2) sent += xStreamBufferSend(playBuf, (uint8_t *)capIn + sent, n * 2 - sent, portMAX_DELAY);
   } else if (line == "tone loud") {
     // Like "tone" but near full scale, as loud as speech peaks
-    Serial.println("Playing LOUD test tone...");
+    Log.println("Playing LOUD test tone...");
     static int16_t blk2[480];
     float ph = 0;
     for (int n = 0; n < API_OUT_RATE * 4; n += 480) {
@@ -840,7 +851,7 @@ void serialCommands() {
     }
   } else if (line == "tone") {
     // 2 s of 440 Hz then 2 s of a slow sweep, through the same path as Billy's voice
-    Serial.println("Playing test tone...");
+    Log.println("Playing test tone...");
     static int16_t blk[480];
     float ph = 0;
     for (int n = 0; n < API_OUT_RATE * 4; n += 480) {
@@ -853,12 +864,18 @@ void serialCommands() {
     }
   } else if (line == "wake=reset") {
     prefs.begin("billy", false); prefs.remove("srbad"); prefs.end();
-    Serial.println("Wake phrase re-enabled. Type restart to apply.");
+    Log.println("Wake phrase re-enabled. Type restart to apply.");
   } else if (line == "restart") {
     ESP.restart();
   } else if (line.length()) {
-    Serial.println("Commands: key=..., wifi=SSID,password, motors=off|on, tone, tone loud, replay, gain=NN, buffer=full|stream, wake=reset, restart");
+    Log.println("Commands: key=..., wifi=SSID,password, motors=off|on, tone, tone loud, replay, gain=NN, buffer=full|stream, wake=reset, restart");
   }
+}
+
+const char *billyStateText() {
+  if (mode != CHATTING) return "waiting for \"Hi ESP\"";
+  if (speechPlaying) return "talking";
+  return "listening";
 }
 
 // ---- tiny diagnostics web page on the home network
@@ -881,7 +898,7 @@ void sendWav(const int16_t *data, size_t samples, uint32_t rate) {
 void startStationWeb() {
   capIn = (int16_t *)ps_malloc(CAP_IN_MAX * 2);
   capOut = (int16_t *)ps_malloc(CAP_OUT_MAX * 2);
-  web.on("/", HTTP_GET, [] {
+  web.on("/diag", HTTP_GET, [] {
     web.send(200, "text/html",
       "<html><body style='font-family:sans-serif'><h2>SassyBass last reply</h2>"
       "<p>From Gemini (24 kHz):<br><audio controls src='/in.wav'></audio> <a href='/in.wav'>download</a></p>"
@@ -890,8 +907,10 @@ void startStationWeb() {
   });
   web.on("/in.wav", HTTP_GET, [] { sendWav(capIn, capInLen, API_OUT_RATE); });
   web.on("/out.wav", HTTP_GET, [] { sendWav(capOut, capOutLen, I2S_RATE); });
+  registerWebApi();
   web.begin();
-  Serial.println("[web] last-reply audio at http://" + WiFi.localIP().toString() + "/");
+  if (MDNS.begin("billybass")) MDNS.addService("http", "tcp", 80);
+  Log.println("[web] settings at http://billybass.local  (or http://" + WiFi.localIP().toString() + "/)");
 }
 
 void loop() {
@@ -917,6 +936,7 @@ void loop() {
   lastDown = down; lastUp = up;
 
   if (mode == WAKE_LISTEN) {
+    personaSwitchPending = false;       // applies automatically at the next chat
     static uint32_t lastUpdateCheck = 0;
     if (lastUpdateCheck == 0) lastUpdateCheck = now;   // boot already checked
     if (now - lastUpdateCheck > UPDATE_EVERY_MS) { lastUpdateCheck = now; checkForUpdate(); }
@@ -928,7 +948,18 @@ void loop() {
   // ---- CHATTING
   ws.poll();
   now = millis();     // poll() can stamp newer times (lastHeard etc.); keep now >= them
-  if (!ws.connected()) { Serial.println("[ai] connection closed"); endChat(); return; }
+
+  // New persona/voice requested (by voice or the web page): reconnect once Billy is quiet
+  if (personaSwitchPending && !endRequested && turnDone && replyComplete && xStreamBufferIsEmpty(playBuf) && !speechPlaying) {
+    personaSwitchPending = false;
+    Log.println("[chat] switching persona - reconnecting");
+    ws.close();
+    sessionReady = false;
+    turnDone = false;
+    lastHeard = millis();
+    if (!connectGemini()) { endChat(); return; }
+  }
+  if (!ws.connected()) { Log.println("[ai] connection closed"); endChat(); return; }
 
   // Billy's turn lasts from his first audio until Gemini says the reply is
   // complete AND the speaker has drained. The mic stays muted the whole time,
@@ -943,7 +974,7 @@ void loop() {
     if (micMuted) { micMuted = false; drainStream(micBuf); bodyRelax(); setLed(0, 0, 60); }
   }
   if (wasTalking && !billyTalking) {
-    Serial.printf("[audio] reply: %u chunks, %u ms audio, gaps %u, bad %u, odd %u, late writes %u (max %u ms), min buffer %u ms\n",
+    Log.printf("[audio] reply: %u chunks, %u ms audio, gaps %u, bad %u, odd %u, late writes %u (max %u ms), min buffer %u ms\n",
                   (unsigned)stChunks, (unsigned)(stBytes * 1000 / (API_OUT_RATE * 2)), (unsigned)audioGaps,
                   (unsigned)stBadChunks, (unsigned)stOddChunks, (unsigned)stLateWrites, (unsigned)stMaxWriteGapMs,
                   (unsigned)(stMinBufMs == 99999 ? 0 : stMinBufMs));
@@ -962,7 +993,7 @@ void loop() {
   }
   if (click) { requestEnd(); endRequestedAt = now - END_GRACE_MS; }   // button = end right away
   if (!billyTalking && now - lastHeard > CONVO_IDLE_MS && now - lastBillyAudio > CONVO_IDLE_MS) {
-    Serial.println("[chat] nobody's talking - going back to sleep");
+    Log.println("[chat] nobody's talking - going back to sleep");
     endChat();
     return;
   }

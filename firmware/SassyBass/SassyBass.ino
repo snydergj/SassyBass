@@ -578,7 +578,7 @@ void onWsMessage(char *msg, size_t len) {
   if (ot) {
     size_t tl; char *t = findStr(ot, "text", tl);
     bool placeholder = t && (strncmp(t, "\\u003c!--", 10) == 0 || strncmp(t, "<!--", 4) == 0);   // Gemini's "empty response" marker
-    if (t && !placeholder) { Log.print("[billy] "); Log.write(t, tl); Log.println(); }
+    if (t && !placeholder) { Log.print("[billy] "); Log.write((const uint8_t *)t, tl); Log.println(); }
   }
   if (interrupted) flushPlayback();
 

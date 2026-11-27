@@ -187,6 +187,20 @@ static const char *level(int v) {
   return "extremely";
 }
 
+// ---------------------------------------------------------------- clock
+// POSIX TZ string; default US Central (CST/CDT with DST). Changeable in the web UI.
+#define DEFAULT_TZ "CST6CDT,M3.2.0,M11.1.0"
+String currentTz() { return personasDoc["tz"] | DEFAULT_TZ; }
+void applyTimezone() { setenv("TZ", currentTz().c_str(), 1); tzset(); }
+bool clockSynced() { return time(nullptr) > 1700000000; }
+String localTimeText() {
+  if (!clockSynced()) return "";
+  time_t now = time(nullptr); struct tm t; localtime_r(&now, &t);
+  char buf[64]; strftime(buf, sizeof buf, "%A, %B %e, %Y, %l:%M %p %Z", &t);
+  String s(buf); s.replace("  ", " ");
+  return s;
+}
+
 String buildInstructions() {
   JsonObject p = activePersona();
   JsonObject t = p["traits"];
@@ -205,6 +219,11 @@ String buildInstructions() {
          "so only mention that if asked. Be genuinely helpful: answer questions, chat, explain things, brainstorm. "
          "Respond in the language you are spoken to. Your replies are spoken aloud, so never use lists, markdown or emoji.\n\n";
   }
+
+  String clock = localTimeText();
+  if (clock.length())
+    s += "The current local date and time at the start of this conversation is " + clock +
+         ". Use it when asked the time, date or day, and to say good morning/afternoon/evening correctly.\n\n";
 
   s += "Personality (0-100, higher is stronger):\n";
   auto trait = [&](const char *key, const char *desc) {

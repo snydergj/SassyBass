@@ -77,6 +77,13 @@ pre{background:#071510;padding:10px;border-radius:8px;white-space:pre-wrap;font-
  <div class="card"><h2>Unhinged mode &#x1F92C;</h2>
   <label class="row" style="color:var(--ink);font-size:1em"><input type="checkbox" id="unh" style="width:auto;flex:0 0 auto;transform:scale(1.4);margin-right:10px">Billy swears, gets crude and roasts harder</label>
   <div class="hint">For adults. Applies to every persona. Google's own safety filters still apply, so he may hold back on the worst stuff.</div></div>
+ <div class="card"><h2>Time zone</h2><select id="tz">
+  <option value="EST5EDT,M3.2.0,M11.1.0">Eastern</option><option value="CST6CDT,M3.2.0,M11.1.0">Central</option>
+  <option value="MST7MDT,M3.2.0,M11.1.0">Mountain</option><option value="MST7">Arizona</option>
+  <option value="PST8PDT,M3.2.0,M11.1.0">Pacific</option><option value="AKST9AKDT,M3.2.0,M11.1.0">Alaska</option>
+  <option value="HST10">Hawaii</option><option value="GMT0BST,M3.5.0/1,M10.5.0">UK</option>
+  <option value="CET-1CEST,M3.5.0,M10.5.0/3">Central Europe</option></select>
+  <div class="hint" id="clock"></div></div>
  <div class="card"><h2>Volume</h2><div class="trait"><span>Volume</span><input type="range" id="vol" min="0" max="100"><b id="volv"></b></div></div>
  <div class="card"><h2>Motor test</h2><div class="row"><button class="s" data-m="mouth">Mouth</button><button class="s" data-m="head">Head</button><button class="s" data-m="tail">Tail</button></div></div>
  <div class="card"><h2>Backup</h2><div class="row"><button class="s" id="export">Download backup</button><button class="s" id="importb">Restore backup</button></div>
@@ -96,7 +103,7 @@ async function api(p,b){const r=await fetch(p,b===undefined?{}:{method:"POST",he
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{document.querySelectorAll("nav button,.tab").forEach(e=>e.classList.remove("on"));b.classList.add("on");$("#"+b.dataset.t).classList.add("on");if(b.dataset.t=="logs")loadLog()});
 $("#pvoice").innerHTML=VOICES.map(v=>`<option value="${v[0]}">${v[0]} (${v[1]})</option>`).join("");
 $("#traits").innerHTML=TRAITS.map(t=>`<div class="trait"><span>${t[0].toUpperCase()+t.slice(1)}</span><input type="range" min="0" max="100" id="t_${t}" oninput="this.nextElementSibling.textContent=this.value"><b></b></div>`).join("");
-async function load(){S=await api("/api/state");$("#status").innerHTML=`v${S.version}${S.unhinged?" \u{1F92C}":""}<br>${S.state}`;renderSel(cur||S.active);renderFacts();$("#unh").checked=!!S.unhinged;$("#vol").value=S.volume;$("#volv").textContent=S.volume;$("#sysinfo").textContent=`Firmware ${S.version} · ${S.ip} · free RAM ${S.heap} · ${S.personas.length} personas · ${S.facts.length} memories`}
+async function load(){S=await api("/api/state");$("#status").innerHTML=`v${S.version}${S.unhinged?" \u{1F92C}":""}<br>${S.state}`;renderSel(cur||S.active);renderFacts();$("#unh").checked=!!S.unhinged;$("#tz").value=S.tz;$("#clock").textContent=S.time?"Billy thinks it is "+S.time:"Clock not synced yet";$("#vol").value=S.volume;$("#volv").textContent=S.volume;$("#sysinfo").textContent=`Firmware ${S.version} · ${S.ip} · free RAM ${S.heap} · ${S.personas.length} personas · ${S.facts.length} memories`}
 function renderSel(id){const ps=S.personas;const opt=p=>`<option value="${p.id}">${p.name}${p.id==S.active?" ★ active":""}</option>`;$("#psel").innerHTML=`<optgroup label="Fish characters">${ps.filter(p=>p.type!="assistant").map(opt).join("")}</optgroup><optgroup label="Regular assistants">${ps.filter(p=>p.type=="assistant").map(opt).join("")}</optgroup>`;if(!ps.find(p=>p.id==id))id=S.active;$("#psel").value=id;show(id)}
 function show(id){cur=id;const p=S.personas.find(x=>x.id==id);if(!p)return;$("#pname").value=p.name||"";$("#ptype").value=p.type||"fish";$("#bscard").style.display=$("#ptype").value=="assistant"?"none":"";$("#pvoice").value=p.voice||"Algenib";$("#pinstr").value=p.instructions||"";const t=p.traits||{};TRAITS.forEach(k=>{const e=$("#t_"+k);e.value=t[k]??50;e.nextElementSibling.textContent=e.value});const b=p.backstory||{};["origin","species","caught","purpose","awakening"].forEach(k=>$("#b_"+k).value=b[k]||"")}
 function collect(){const t={};TRAITS.forEach(k=>t[k]=+$("#t_"+k).value);const b={};["origin","species","caught","purpose","awakening"].forEach(k=>b[k]=$("#b_"+k).value);return{id:cur,type:$("#ptype").value,name:$("#pname").value.trim()||"Billy",voice:$("#pvoice").value,instructions:$("#pinstr").value,traits:t,backstory:b}}
@@ -112,6 +119,7 @@ async function saveFacts(){await api("/api/memory",{facts:S.facts});await load()
 window.delFact=async i=>{S.facts.splice(i,1);await saveFacts();toast("Forgotten")};
 $("#addfact").onclick=async()=>{const v=$("#newfact").value.trim();if(!v)return;S.facts.push(v);$("#newfact").value="";await saveFacts();toast("Remembered")};
 $("#unh").onchange=e=>api("/api/unhinged",{on:e.target.checked}).then(()=>{S.unhinged=e.target.checked;toast(e.target.checked?"Unhinged mode ON":"Unhinged mode off")});
+$("#tz").onchange=e=>api("/api/tz",{tz:e.target.value}).then(()=>{toast("Time zone set");load()});
 $("#vol").oninput=e=>$("#volv").textContent=e.target.value;$("#vol").onchange=e=>api("/api/volume",{v:+e.target.value}).then(()=>toast("Volume set"));
 document.querySelectorAll("[data-m]").forEach(b=>b.onclick=()=>fetch("/api/test?m="+b.dataset.m));
 $("#export").onclick=()=>location.href="/api/export";
@@ -156,6 +164,8 @@ void registerWebApi() {
     d["state"] = billyStateText();
     d["volume"] = volume;
     d["unhinged"] = personasDoc["unhinged"] | false;
+    d["tz"] = currentTz();
+    d["time"] = localTimeText();
     d["heap"] = (uint32_t)ESP.getFreeHeap();
     d["active"] = activePersona()["id"].as<String>();
     d["personas"] = personasDoc["personas"];
@@ -227,6 +237,18 @@ void registerWebApi() {
     savePersonas();
     personaSwitchPending = true;     // reconnect so the new rules apply right away
     Log.printf("[web] unhinged mode %s\n", (personasDoc["unhinged"] | false) ? "ON" : "off");
+    web.send(200, "text/plain", "ok");
+  });
+
+  web.on("/api/tz", HTTP_POST, [] {
+    JsonDocument in; if (!readBody(in)) return;
+    String tz = in["tz"] | DEFAULT_TZ;
+    if (tz.length() < 3 || tz.length() > 60) { web.send(400, "text/plain", "bad tz"); return; }
+    personasDoc["tz"] = tz;
+    savePersonas();
+    applyTimezone();
+    personaSwitchPending = true;     // reconnect so the new time applies right away
+    Log.printf("[web] time zone %s -> %s\n", tz.c_str(), localTimeText().c_str());
     web.send(200, "text/plain", "ok");
   });
 

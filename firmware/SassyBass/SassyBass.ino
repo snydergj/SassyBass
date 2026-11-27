@@ -793,6 +793,7 @@ void setup() {
   }
   Log.println("Wi-Fi OK: " + WiFi.localIP().toString());
   startStationWeb();
+  configTzTime(currentTz().c_str(), "pool.ntp.org", "time.google.com", "time.nist.gov");
   checkForUpdate();                                    // reboots if a newer release was installed
   startWakeRecognizer();                               // after the update check so it has RAM to itself
 

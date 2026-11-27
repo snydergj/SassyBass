@@ -42,14 +42,18 @@ void checkForUpdate() {
     Serial.println("[ota] dev build - auto-update off");
     return;
   }
-  NetworkClientSecure client; secureClient(client);
-  HTTPClient http;
-  http.setTimeout(8000);
-  if (!http.begin(client, UPDATE_URL)) return;
-  int code = http.GET();
-  if (code != 200) { Serial.printf("[ota] check failed (%d)\n", code); http.end(); return; }
-  String body = http.getString();
-  http.end();
+  String body;
+  {                                   // scoped: free this TLS session before the download opens another
+    NetworkClientSecure client; secureClient(client);
+    HTTPClient http;
+    http.setTimeout(8000);
+    if (!http.begin(client, UPDATE_URL)) return;
+    int code = http.GET();
+    if (code != 200) { Serial.printf("[ota] check failed (%d)\n", code); http.end(); return; }
+    body = http.getString();
+    http.end();
+    client.stop();
+  }
 
   String latest = jsonValue(body, "version");
   String bin = jsonValue(body, "bin");
@@ -67,6 +71,9 @@ void checkForUpdate() {
     if (pct / 10 != lastPct / 10) { Serial.printf("[ota] %d%%\n", pct); lastPct = pct; }
     setLed((pct / 10) % 2 ? 50 : 10, (pct / 10) % 2 ? 50 : 10, (pct / 10) % 2 ? 50 : 10);
   });
+  Serial.printf("[ota] internal RAM free %u (largest %u)\n",
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   t_httpUpdate_return r = httpUpdate.update(dl, bin);
   if (r == HTTP_UPDATE_FAILED)
     Serial.printf("[ota] failed: %s\n", httpUpdate.getLastErrorString().c_str());

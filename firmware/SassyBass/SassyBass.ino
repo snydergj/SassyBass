@@ -780,8 +780,6 @@ void setup() {
     setLed(30, 0, 40); startPortal(); return;
   }
 
-  startWakeRecognizer();   // before Wi-Fi/TLS, while internal RAM is still plentiful
-
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
@@ -796,6 +794,7 @@ void setup() {
   Log.println("Wi-Fi OK: " + WiFi.localIP().toString());
   startStationWeb();
   checkForUpdate();                                    // reboots if a newer release was installed
+  startWakeRecognizer();                               // after the update check so it has RAM to itself
 
   headOut(); delay(500); bodyRelax(); tailOut(); delay(250); bodyRelax();   // hello wiggle
   listenForWake();
@@ -939,7 +938,12 @@ void loop() {
     personaSwitchPending = false;       // applies automatically at the next chat
     static uint32_t lastUpdateCheck = 0;
     if (lastUpdateCheck == 0) lastUpdateCheck = now;   // boot already checked
-    if (now - lastUpdateCheck > UPDATE_EVERY_MS) { lastUpdateCheck = now; checkForUpdate(); }
+    if (now - lastUpdateCheck > UPDATE_EVERY_MS) {
+      lastUpdateCheck = now;
+      wakeStop();                         // free RAM for the TLS download
+      checkForUpdate();
+      wakeStart();
+    }
     if (wakeHeard || click) { wakeHeard = false; startChat(); }
     delay(5);
     return;

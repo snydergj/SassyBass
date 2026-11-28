@@ -966,7 +966,8 @@ void serialCommands() {
 }
 
 const char *billyStateText() {
-  if (mode != CHATTING) return "waiting for \"" + activeWakeName() + "\"";
+  static String waiting;
+  if (mode != CHATTING) { waiting = "waiting for \"" + activeWakeName() + "\""; return waiting.c_str(); }
   if (speechPlaying) return "talking";
   return "listening";
 }

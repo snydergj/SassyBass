@@ -87,7 +87,13 @@ jobs:
         run: |
           mkdir -p out
           cp build/SassyBass.ino.bin build/SassyBass.ino.bootloader.bin build/SassyBass.ino.partitions.bin build/boot_app0.bin out/
-          cp build/srmodels.bin out/
+          # Speech models: the core's VAD + a set of English wake words from esp-sr 2.5.3
+          # (the esp-sr version arduino-esp32 3.3.12 was built with). See tools/pack_srmodels.py.
+          WORDS=$(python3 -c "import sys; sys.path.insert(0,'tools'); import pack_srmodels as p; print(' '.join('/model/wakenet_model/'+w+'/' for w in p.WAKE_WORDS))")
+          git clone -q --filter=blob:none --no-checkout https://github.com/espressif/esp-sr /tmp/esp-sr
+          git -C /tmp/esp-sr sparse-checkout set --no-cone $WORDS
+          git -C /tmp/esp-sr -c advice.detachedHead=false checkout -q 0a6e15d
+          python3 tools/pack_srmodels.py build/srmodels.bin /tmp/esp-sr out/srmodels.bin
           ls -la out
 
       - uses: actions/upload-artifact@v4

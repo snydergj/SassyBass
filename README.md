@@ -59,7 +59,7 @@ The key is stored only in the fish's settings storage (NVS). **It is never in th
 
 ## Using it
 
-- Say **"Hi E-S-P"** (the wake word), chat, and say **"goodbye"** to end. The chat also ends after 45 seconds of silence.
+- Say **"Hi E-S-P"** (the default wake word; others such as Alexa, Jarvis, Computer, Hey Willow and Sophia can be picked on the Billy tab of the web page), chat, and say **"goodbye"** to end. The chat also ends after 45 seconds of silence.
 - The red button (or BOOT or K2) starts or ends a chat.
 - Ask for louder or quieter, or press K1 (down) / K3 (up).
 - Ask him to dance, flap his tail, or change his light color. These are Gemini function calls handled in `runTool()`.

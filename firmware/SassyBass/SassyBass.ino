@@ -3,7 +3,7 @@
 //  https://github.com/snydergj/SassyBass
 //  Waveshare ESP32-S3-AUDIO-Board + DRV8833 + Google Gemini Live API
 //
-//  Say "Hi E-S-P" (Espressif's built-in wake word) -> chat -> say "goodbye".
+//  Say the wake word ("Hi E-S-P" by default; pick another on the web page) -> chat -> say "goodbye".
 //  The red button (or BOOT / K2) also starts or ends a chat.
 //
 //  Arduino IDE settings:
@@ -234,10 +234,47 @@ void wakeDetectTask(void *) {
   vTaskDelete(NULL);
 }
 
+// ---- wake word choice (web page "Wake word"; stored as personasDoc["wake"])
+#define DEFAULT_WAKE "wn9_hiesp"
+String activeWake = DEFAULT_WAKE;       // model actually running
+
+String wakeDisplayName(const String &id) {
+  static const char *const names[][2] = {
+    {"wn9_hiesp", "Hi ESP"}, {"wn9_alexa", "Alexa"}, {"wn9_jarvis_tts", "Jarvis"},
+    {"wn9_computer_tts", "Computer"}, {"wn9_heywillow_tts", "Hey Willow"}, {"wn9_heywanda_tts", "Hey Wanda"},
+    {"wn9_sophia_tts", "Sophia"}, {"wn9_mycroft_tts", "Mycroft"}, {"wn9_hijoy_tts", "Hi Joy"},
+    {"wn9_heykira_tts3", "Hey Kira"}, {"wn9_hijason_tts2", "Hi Jason"}, {"wn9_heyivy_tts2", "Hey Ivy"}};
+  for (auto &n : names) if (id == n[0]) return n[1];
+  return id;
+}
+String activeWakeName() { return wakeDisplayName(activeWake); }
+
+bool wakeModelInstalled(const String &id) {
+  if (!srModels) return false;
+  for (int i = 0; i < srModels->num; i++)
+    if (id == srModels->model_name[i]) return true;
+  return false;
+}
+
+// Wake words in the speech-model partition (older fish only have Hi ESP until reflashed by USB)
+void wakeListJson(JsonArray arr) {
+  if (!srModels) return;
+  for (int i = 0; i < srModels->num; i++) {
+    String id = srModels->model_name[i];
+    if (!id.startsWith("wn")) continue;
+    JsonObject o = arr.add<JsonObject>();
+    o["id"] = id; o["name"] = wakeDisplayName(id);
+  }
+}
+
 bool wakeStart() {
   if (!srModels || wakeRunning) return wakeRunning;
   afe_config_t *cfg = afe_config_init(MIC_CHANNEL == 0 ? "MN" : "NM", srModels, AFE_TYPE_SR, AFE_MODE_LOW_COST);
   if (!cfg) return false;
+  String want = personasDoc["wake"] | DEFAULT_WAKE;
+  if (!wakeModelInstalled(want)) want = cfg->wakenet_model_name ? cfg->wakenet_model_name : DEFAULT_WAKE;
+  cfg->wakenet_model_name = strdup(want.c_str());   // tiny leak per start if the lib doesn't free it - fine
+  activeWake = want;
   afe = esp_afe_handle_from_config(cfg);
   afeData = afe ? afe->create_from_config(cfg) : nullptr;
   afe_config_free(cfg);
@@ -690,7 +727,8 @@ void listenForWake() {
   bodyRelax();
   setLed(0, 0, 0);
   bool on = srOk && wakeStart();
-  Log.println(on ? "[wake] listening for \"Hi E-S-P\"" : "[wake] wake word off - use the button");
+  if (on) Log.printf("[wake] listening for \"%s\"\n", activeWakeName().c_str());
+  else Log.println("[wake] wake word off - use the button");
 }
 
 void startChat() {
@@ -744,8 +782,13 @@ static void printHeap(const char *tag) {
 // loop. A new firmware version tries again.
 void startWakeRecognizer() {
   prefs.begin("billy", false);
-  if (prefs.getBool("srtry", false) && esp_reset_reason() == ESP_RST_PANIC)
-    prefs.putString("srbad", FW_VERSION);              // crashed during the last attempt
+  if (prefs.getBool("srtry", false) && esp_reset_reason() == ESP_RST_PANIC) {
+    String w = personasDoc["wake"] | DEFAULT_WAKE;
+    if (w != DEFAULT_WAKE) {                           // a newly chosen wake word crashed: go back to Hi ESP
+      Log.printf("!! Wake word %s crashed - switching back to Hi ESP\n", w.c_str());
+      personasDoc["wake"] = DEFAULT_WAKE; savePersonas();
+    } else prefs.putString("srbad", FW_VERSION);       // crashed during the last attempt
+  }
   prefs.putBool("srtry", false);
   bool disabled = prefs.getString("srbad", "") == FW_VERSION;
   if (!disabled) prefs.putBool("srtry", true);
@@ -768,6 +811,23 @@ void startWakeRecognizer() {
   prefs.begin("billy", false);
   prefs.putBool("srtry", false);
   prefs.end();
+}
+
+// Called from the web page. Restarts the engine right away when Billy is idle,
+// inside the crash guard so a bad model falls back to Hi ESP after a reboot.
+bool setWakeWord(const String &id) {
+  if (!wakeModelInstalled(id)) return false;
+  personasDoc["wake"] = id;
+  savePersonas();
+  Log.printf("[wake] wake word set to %s\n", wakeDisplayName(id).c_str());
+  if (mode == WAKE_LISTEN && srOk) {
+    prefs.begin("billy", false); prefs.putBool("srtry", true); prefs.end();
+    wakeStop();
+    bool on = wakeStart();
+    prefs.begin("billy", false); prefs.putBool("srtry", false); prefs.end();
+    Log.printf("[wake] listening for \"%s\"%s\n", activeWakeName().c_str(), on ? "" : " (failed to start)");
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------- setup
@@ -906,7 +966,7 @@ void serialCommands() {
 }
 
 const char *billyStateText() {
-  if (mode != CHATTING) return "waiting for \"Hi ESP\"";
+  if (mode != CHATTING) return "waiting for \"" + activeWakeName() + "\"";
   if (speechPlaying) return "talking";
   return "listening";
 }
